@@ -10,7 +10,7 @@ rating.predict(5.0) # discharge at stage = 5 ft
 rating.plot()
 ```
 
-Units are feet (stage) and cfs (discharge) throughout.
+Units are feet (stage) and cfs (discharge) throughout. See the [examples/getting_started.ipynb](./examples/getting_started.ipynb) for a walkthrough of basic functionality.
 
 ## Setup
 
@@ -31,7 +31,7 @@ That installs everything except integration with `pagaia`, which can optionally 
 pip install -e ".[pagaia]"
 ```
 
-You may have to request access to the private LimnoTech `pagaia` repostitory. You will also have to set
+You may have to request access to the private LimnoTech `pagaia` repostitory. You will also have to set `PAGAIA_AUTH_TOKEN` in your environment variables to your Freeboard API Key.
 
 ## VS Code
 
