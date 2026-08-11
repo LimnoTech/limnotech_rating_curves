@@ -1,0 +1,87 @@
+# Conda environment for limnotech_rating_curves.
+#
+#   conda env create -f environment.yml
+#   conda activate rating_curves
+#   pip install -e .
+#
+# Every model, every sampler, the USGS and spreadsheet data sources and the notebooks
+# work after this file is created. The one piece not here is fb-pagaia, the LimnoTech
+# ODM2 client: it is the `pagaia` extra in pyproject.toml, added with
+#
+#   pip install -e ".[pagaia]"
+#
+# Why conda rather than pip alone: PyTensor (PyMC's backend) compiles its log-density
+# with a C++ compiler, and conda-forge ships one for Windows, macOS and Linux under the
+# same name. See the note on `gxx` below.
+name: rating_curves
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.12
+
+  # numerics
+  - numpy>=1.26
+  - pandas>=2.0
+  - scipy>=1.11
+
+  # PyMC and its backend. pymc <6 and arviz <1 are pinned deliberately: the ELPD path
+  # uses arviz.loo / arviz.waic with a supplied relative efficiency, and both packages
+  # have breaking changes queued for their next majors.
+  - pymc>=5.16,<6
+  - arviz>=0.18,<1
+  - pytensor
+
+  # The C++ compiler PyTensor compiles against. Without it PyTensor falls back to its
+  # NumPy path, which still gives the same answers but is slow enough to matter: an
+  # ADVI fit that takes 30 seconds here did not finish in 13 minutes without it.
+  # conda-forge builds `gxx` for win-64, osx-64, osx-arm64 and linux-64, so this one
+  # line covers every platform. On macOS the compiler uses the system SDK headers, so
+  # `xcode-select --install` may be needed as well.
+  - gxx
+
+  # Every NUTS implementation the package can be pointed at (settings.NUTS_SAMPLERS).
+  # nutpie is the default and the fastest by a wide margin - about 8x PyMC's own NUTS
+  # on these models. It is worth knowing that nutpie needs no C++ compiler of its own:
+  # it compiles the log-density through numba, which carries its own LLVM.
+  # numpyro and blackjax are in the pip section below, not here: conda-forge has no
+  # win-64 jaxlib build and both require it, so listing them on this side makes the
+  # solve fail with "nothing provides jaxlib".
+  - nutpie>=0.13
+  - numba
+
+  # plotting and the interactive map
+  - matplotlib>=3.8
+  - plotly>=5.20
+
+  # models and data sources. ratingcurve is in the pip section below, not here.
+  - patsy                # ratingcurve's one dependency that is not already listed
+  - dataretrieval>=1.0   # the USGS web-service client
+  - requests>=2.31
+  - pyyaml>=6.0
+  - openpyxl>=3.1        # the MAGL manual-discharge spreadsheets
+  - netcdf4              # exporting posteriors
+  - pyarrow
+
+  # notebooks and tests
+  - jupyter
+  - ipykernel
+  - nbformat
+  - pytest>=8.0
+  - pytest-cov
+
+  - pip
+  - pip:
+      # The USGS rating models. From PyPI because conda-forge's newest build is
+      # 1.0.2, which calls pm.MutableData - removed in the pymc pinned above, so
+      # every power-law and spline fit fails on it. 1.0.3 is the fix and is on
+      # PyPI only.
+      - ratingcurve>=1.0.3
+      # The two jax-backed NUTS samplers. They are here because conda-forge builds
+      # no win-64 jaxlib, which both of them require; PyPI has the wheels. jaxlib
+      # carries its own XLA and does not touch numpy's BLAS.
+      - jax
+      - jaxlib
+      - numpyro
+      - blackjax

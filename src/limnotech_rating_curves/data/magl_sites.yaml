@@ -1,0 +1,45 @@
+# Site registry for the LimnoTech rating-curve tool (and the repo's cluster config).
+#
+# This is the one place the set of stations and gages is declared. clusters.py loads
+# it at import and rebuilds its lookup tables from it; the rating-curve CLI reads it
+# to resolve --site selections. Edit this file to add a site - no code change needed.
+#
+# A cluster is a stream-network group, labeled by the station-name prefix
+# (SR-08_WL -> SR). USGS gages inherit a cluster from a co-located station or from an
+# explicit standalone mapping.
+#
+# IMPORTANT: USGS gage / site ids are STRINGS - leading zeros are significant. Always
+# quote them ("04176356"), never write them bare (4176356 would lose the zero and
+# 041843678 is 9 digits, not 8). The loader warns if it finds an unquoted integer.
+
+# Optional per-cluster metadata (name, datum note). Clusters are also inferred from
+# the pairs / gages below, so this block is only for extra description.
+clusters:
+  LC:  {name: "LC cluster"}
+  ND:  {name: "ND cluster"}
+  SBR: {name: "SBR cluster"}
+  SR:  {name: "SR cluster"}
+  SSL: {name: "SSL cluster"}
+
+# Co-located pairs: a LimnoTech station (base name, no _WL suffix) and the USGS gage
+# at the same location (the station is treated as immediately upstream of its gage).
+# cluster is optional; it defaults to the station-name prefix.
+colocated_pairs:
+  - {station: SR-08,  gage: "04176356"}
+  - {station: SBR-01, gage: "04175748"}
+  - {station: LC-01,  gage: "041843678"}
+  - {station: ND-01,  gage: "04176063"}
+
+# Standalone USGS gages (no co-located station) and their cluster.
+standalone_gages:
+  - {gage: "04184500", cluster: LC}
+  - {gage: "04176617", cluster: SSL}
+  - {gage: "04176400", cluster: SR}
+
+# Stations whose stage is NOT available from the pagaia API and must be read from the
+# spreadsheet pickle. entry_key indexes into that pickle; distances there are in FEET.
+# pickle paths are resolved relative to this file's directory.
+special_stations:
+  - {station: SSL-02_WL, pickle: data/timeseries/magl_spreadsheet_timeseries.pkl, entry_key: 48}
+  - {station: SR-02_WL,  pickle: data/timeseries/magl_spreadsheet_timeseries.pkl, entry_key: 35}
+  - {station: ND-02_WL,  pickle: data/timeseries/magl_spreadsheet_timeseries.pkl, entry_key: 12}
