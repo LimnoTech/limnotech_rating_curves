@@ -12,6 +12,7 @@ examples/fits/
 examples/half_a_copy/
 examples/orphans_only/
 examples/ship/
+examples/maps_output/
 
 *.md
 !README.md
