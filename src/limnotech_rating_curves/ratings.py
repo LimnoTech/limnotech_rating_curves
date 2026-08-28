@@ -31,11 +31,13 @@ class RatingModel:
     ``predict(stage)``          posterior-mean discharge
     ``interval(stage, level)``  credible interval for discharge
     ``curve(stage, level)``     the whole fitted rating as a table
+    ``table(step, ...)``        the same, on an evenly spaced stage grid, for a
+                                spreadsheet or a lookup
     ``metrics``                 fit and predictive scores
     ``cross_validate()``        refit on subsets and score the held-out points
+    ``logo(block)``             leave-one-group-out ELPD, for data that is not
+                                independent of itself (a continuous record)
     ``summary()``               posterior summary of the parameters
-    ``equation()``              the fitted curve written out, where it has a
-                                closed form
     ``diagnostics()``           convergence diagnostics (R-hat, ESS)
     ``plot(ax)``                measurements, curve and band
     ``plot_residuals(ax)``      predicted / observed against stage
@@ -219,6 +221,55 @@ class RatingModel:
                                   left=np.nan, right=np.nan)
         return float(predicted[0]) if scalar else predicted
 
+    def posterior_mean(self, stage):
+        """Posterior-mean discharge of the fitted rating, ``E[exp(mu)]``.
+
+        Averages the rating over every posterior draw. This differs from
+        :meth:`predict`, which averages the posterior *predictive* - the rating plus
+        a simulated field-measurement error. Because the models fit in log space and
+        report cfs, that error does not average out; it inflates the result by
+        ``exp(sigma ** 2 / 2)``. See ``posterior_clarification.md``.
+
+        Parameters
+        ----------
+        stage : float or array-like
+            Gage height (feet).
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Discharge (cfs) - a float for a scalar stage, else an array.
+
+        Raises
+        ------
+        NotImplementedError
+            For families that do not expose their mean function.
+        """
+        scalar = np.ndim(stage) == 0
+        predicted = self._posterior_source().posterior_mean(
+            np.atleast_1d(np.asarray(stage, float)))
+        predicted = np.asarray(predicted, float)
+        return float(predicted[0]) if scalar else predicted
+
+    def posterior_draws(self, stage) -> np.ndarray:
+        """Draws of the fitted rating (cfs), without gaging scatter.
+
+        The draws :meth:`posterior_mean` averages, shaped ``(stages, draws)``.
+        """
+        return self._posterior_source().posterior_draws(
+            np.atleast_1d(np.asarray(stage, float)))
+
+    def _posterior_source(self):
+        """The fitted object exposing the mean function, or a refusal naming why not."""
+        self._require_fit()
+        rating = self._fit.rating
+        if rating is None or not hasattr(rating, "posterior_mean"):
+            raise NotImplementedError(
+                f"{type(self).__name__} ({self.family}) does not expose its mean "
+                f"function; posterior_mean is available for the ratingcurve family "
+                f"and the hierarchical model. Use .predict() or .curve().")
+        return rating
+
     def interval(self, stage, level: float = 0.95):
         """The credible interval for discharge at the given stage.
 
@@ -258,8 +309,11 @@ class RatingModel:
         Returns
         -------
         pandas.DataFrame
-            Columns ``stage_ft``, ``discharge_cfs`` (posterior mean),
-            ``discharge_median_cfs``, ``lower``, ``upper``.
+            Columns ``stage_ft``, ``discharge_cfs`` (the posterior mean of the
+            rating), ``lower``, ``upper``. The Bayesian families add
+            ``discharge_predictive_mean_cfs`` and
+            ``discharge_predictive_median_cfs``; the least-squares families have no
+            posterior predictive and report ``discharge_median_cfs`` instead.
         """
         self._require_fit()
         if stage is None and self._fit.curve is not None:
@@ -271,13 +325,21 @@ class RatingModel:
         if self._fit.rating is not None:
             grid = None if stage is None else np.atleast_1d(np.asarray(stage, float))
             table = self._fit.rating.table(stage=grid)
-            median = table["discharge_median_cfs"].to_numpy(float)
+            if "gse" not in table:
+                # the hierarchical model tabulates its own interval from the draws
+                evaluated = table.copy()
+                if grid is not None and grid.size == 1:
+                    evaluated = evaluated.iloc[:1].reset_index(drop=True)
+                return evaluated
+            median = table["discharge_predictive_median_cfs"].to_numpy(float)
             gse = table["gse"].to_numpy(float)
             z = _quantile_z(level)
             evaluated = pd.DataFrame({
                 "stage_ft": table["stage_ft"].to_numpy(float),
                 "discharge_cfs": table["discharge_cfs"].to_numpy(float),
-                "discharge_median_cfs": median,
+                "discharge_predictive_mean_cfs":
+                    table["discharge_predictive_mean_cfs"].to_numpy(float),
+                "discharge_predictive_median_cfs": median,
                 "lower": median * gse ** (-z), "upper": median * gse ** z})
             # the backend pads a single-stage request to keep the spline basis 2-D
             if grid is not None and grid.size == 1:
@@ -288,14 +350,76 @@ class RatingModel:
         if stage is None:
             return fitted.reset_index(drop=True)
         stages = np.asarray(stage, float)
-        return pd.DataFrame({
-            "stage_ft": stages,
-            "discharge_cfs": np.interp(stages, fitted["stage_ft"],
-                                       fitted["discharge_cfs"]),
-            "discharge_median_cfs": np.interp(stages, fitted["stage_ft"],
-                                              fitted["discharge_median_cfs"]),
-            "lower": np.interp(stages, fitted["stage_ft"], fitted["lower"]),
-            "upper": np.interp(stages, fitted["stage_ft"], fitted["upper"])})
+        # whatever discharge columns this family reports, interpolated onto `stages`
+        interpolated = {"stage_ft": stages}
+        for column in fitted.columns:
+            if column == "stage_ft":
+                continue
+            interpolated[column] = np.interp(stages, fitted["stage_ft"],
+                                             fitted[column])
+        return pd.DataFrame(interpolated)
+
+    def table(self, *, stage_min=None, stage_max=None, step: float = 0.01,
+              precision=None, level: float = 0.95, path=None) -> pd.DataFrame:
+        """The fitted rating on an evenly spaced stage grid, for a spreadsheet.
+
+        The lookup table a field engineer or a telemetry system uses: a row per
+        stage at a fixed step, rather than the model's own tabulation grid that
+        :meth:`curve` reports. :class:`~limnotech_rating_curves.exports.SavedRating`
+        has the same method with the same arguments, so this reads identically
+        against a live fit and against one read back from disk.
+
+        By default it starts just above the fitted stage of zero flow, which is the
+        lowest stage the rating is defined at, and stops at the top of the fitted
+        curve. Pass ``stage_max=`` to extrapolate above the measurements - a power
+        law extrapolates defensibly, a spline does not.
+
+        Parameters
+        ----------
+        stage_min : float, optional
+            First stage, in feet. Defaults to the first grid point above
+            :attr:`zero_flow`, or the bottom of :meth:`curve` when the model has no
+            stage of zero flow.
+        stage_max : float, optional
+            Last stage, in feet. Defaults to the top of :meth:`curve`.
+        step : float, default 0.01
+            Spacing in feet. Use 0.001 for a thousandths table.
+        precision : int, optional
+            Decimal places for the stage column. Defaults to `step`'s own places, so
+            a 0.001 step gives stages rounded to three decimals.
+        level : float, default 0.95
+            Width of the reported interval.
+        path : path-like, optional
+            Write the table here as CSV as well as returning it.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The columns :meth:`curve` reports - ``stage_ft``, ``discharge_cfs``,
+            ``lower``, ``upper``, plus whichever summary columns the family has.
+
+        Examples
+        --------
+        >>> rating.table(stage_max=40.0, step=0.001, path="rating_table.csv")
+        ... # doctest: +SKIP
+        """
+        from .exports import rating_table
+
+        self._require_fit()
+        fitted = self.curve()
+        if stage_min is None:
+            zero_flow = self.zero_flow
+            if np.isfinite(zero_flow):
+                # the rating is undefined at and below the stage of zero flow, so
+                # start at the first grid point strictly above it
+                stage_min = np.ceil(zero_flow / step) * step + step
+            else:
+                stage_min = float(fitted["stage_ft"].min())
+        if stage_max is None:
+            stage_max = float(fitted["stage_ft"].max())
+        return rating_table(lambda stages: self.curve(stage=stages, level=level),
+                            stage_min, stage_max, step=step, precision=precision,
+                            path=path)
 
     @property
     def zero_flow(self) -> float:
@@ -350,6 +474,69 @@ class RatingModel:
                                          fit_arguments=self.fit_arguments)
         return Metrics.from_fit(self._fit)
 
+    def logo(self, block: str = "6h", *, groups=None) -> dict:
+        """Leave-one-group-out ELPD for this fit, blocked in time.
+
+        The score to read instead of ``metrics.elpd_loo`` when the measurements are
+        not independent of each other - a continuous 15-minute record above all,
+        where leaving out one reading leaves its neighbours 15 minutes either side in
+        the training set and the resulting ELPD is optimistic. Blocking in time makes
+        the held-out unit span more than one reading. See
+        :mod:`limnotech_rating_curves.evaluate.logo` for why this is the same PSIS
+        estimator rather than a different one, for why it is worth using on field
+        measurements too (a block this short on gaugings is leave-one-out for almost
+        every point, so one estimator covers both), and for the measured sweep the
+        default block length comes from.
+
+        Needs the sample's timestamps and the posterior in memory, so it is available
+        for a NUTS fit of a Bayesian family and not for an ADVI fit, a least-squares
+        family, or a fit that crossed a process boundary.
+
+        Parameters
+        ----------
+        block : str, default ``"6h"``
+            Block length as a pandas offset alias, when `groups` is not given. Six
+            hours is :data:`limnotech_rating_curves.evaluate.logo.DEFAULT_BLOCK`,
+            chosen from a measured reliability sweep; a longer block is more honest
+            about autocorrelation but quickly becomes impossible for PSIS to compute,
+            so check ``reliable`` on the result.
+        groups : array-like, optional
+            Group label per measurement, overriding `block` - e.g. from
+            :func:`limnotech_rating_curves.evaluate.logo.stage_bands` to ask whether
+            the curve generalizes to a flow range it never saw.
+
+        Returns
+        -------
+        dict
+            What :func:`limnotech_rating_curves.evaluate.logo.elpd_logo` returns,
+            including ``elpd_per_obs`` and ``obs_per_group``, or NaNs with a ``note``
+            saying why it could not be computed.
+        """
+        from .evaluate import logo as logo_module
+        from .evaluate import metrics as metrics_module
+
+        self._require_fit()
+        pointwise = metrics_module.pointwise_log_likelihood(self._fit)
+        if pointwise is None:
+            return {**metrics_module.unavailable(
+                "no pointwise log-likelihood - needs a NUTS fit of a Bayesian family, "
+                "with its posterior still in memory"),
+                "n_groups": 0, "n_observations": 0,
+                "obs_per_group": float("nan"), "elpd_per_obs": float("nan")}
+        log_likelihood, log_offset = pointwise
+
+        if groups is None:
+            time = getattr(self.sample, "time", None)
+            if time is None:
+                return {**metrics_module.unavailable(
+                    "the sample carries no timestamps, so it cannot be blocked in "
+                    "time; pass groups= to block it some other way"),
+                    "n_groups": 0, "n_observations": 0,
+                    "obs_per_group": float("nan"), "elpd_per_obs": float("nan")}
+            groups = logo_module.time_blocks(time, block=block)
+
+        return logo_module.elpd_logo(log_likelihood, groups, log_offset=log_offset)
+
     def cross_validate(self, **kwargs):
         """Refit this model on subsets of its own sample and score the held-out points.
 
@@ -375,24 +562,6 @@ class RatingModel:
         """
         self._require_fit()
         return _cross_validate(self.sample, [self.name], self.fit_arguments, kwargs)
-
-    def equation(self, precision: int = 6) -> str:
-        """The fitted curve written out, for the families that have a closed form.
-
-        Parameters
-        ----------
-        precision : int, default 6
-            Significant figures per coefficient.
-
-        Returns
-        -------
-        str
-            The equation, or an empty string for a family whose curve cannot be
-            written as one - the spline, whose shape is a basis matrix and its
-            weights, and bdrc, whose exponent varies continuously with stage. Those
-            two are read through :meth:`curve` and :meth:`predict` instead.
-        """
-        return ""
 
     def summary(self, var_names=None) -> pd.DataFrame:
         """Posterior summary of the fitted parameters.
@@ -601,30 +770,41 @@ class PowerLaw(RatingModel):
                 f"PL {self.segments}-seg", catalog.color("power_law"),
                 "power_law", self.segments, max(3, 3 * self.segments))
 
-    @property
-    def coefficients(self) -> dict:
-        """The closed-form coefficients, in discharge units.
+    def equation(self) -> dict:
+        """The denormalized power-law parameters, in ratingcurve's own log-space form.
 
-        ``coefficient`` (:math:`C`), ``exponents`` (:math:`\\beta`, one per segment)
-        and ``breakpoints`` (feet; the first is :attr:`zero_flow`), taken at the
-        posterior mean. See
-        :meth:`~limnotech_rating_curves.models.ratingcurve.BayesianRating.coefficients`
-        for the exact form they combine in, and for why the curve through them
-        tracks the median rather than the mean of :meth:`predict`.
-        """
-        self._require_fit()
-        return self._fit.rating.coefficients()
+        Returns ``a``, ``b`` and ``hs`` such that
 
-    def equation(self, precision: int = 6) -> str:
-        """The fitted power law, written out.
+        .. math::
+
+            \\ln q = a + \\sum_i b_i \\ln\\!\\big(\\max(h - hs_i,\\,0) + ho_i\\big)
+
+        with :math:`ho_0 = 0` and :math:`ho_i = 1` for :math:`i > 0` - the form the
+        upstream ``ratingcurve`` package documents, passed through unchanged so the
+        same parameters can be quoted. This is the only form reported for a Bayesian
+        fit; exponentiate it if the multiplicative
+        :math:`Q = e^{a}(h - hs_0)^{b_0}` form is wanted.
+
+        Only the power law has this form: a spline is a basis matrix and its weights,
+        and bdrc's exponent varies continuously with stage. Read those through
+        :meth:`curve` and :meth:`predict`.
+
+        These are posterior mean parameters, so the curve they describe follows
+        ``discharge_predictive_median_cfs`` more closely than ``discharge_cfs``, and
+        near a breakpoint it kinks where the draws smear - see
+        :meth:`~limnotech_rating_curves.models.ratingcurve.BayesianRating.equation`.
+
+        Alongside the numbers it carries the notation they belong to - ``ho``, the
+        ``symbolic`` form as text, and ``numeric``, the same form with the fitted
+        values substituted in - so a quoted equation cannot be misread.
 
         Examples
         --------
-        >>> PowerLaw().fit(measurements).equation()      # doctest: +SKIP
-        'Q = 182.16 (h - 5.12323)^1.46971'
+        >>> PowerLaw(segments=2).fit(measurements).equation()["numeric"]  # doctest: +SKIP
+        'ln(q) = 6.85277 + 1.18728 * ln(max(h - 0.829294, 0)) + 0.248774 * ln(max(h - 3.55029, 0) + 1)'
         """
         self._require_fit()
-        return self._fit.rating.equation(precision=precision)
+        return self._fit.rating.equation()
 
     def _config_repr(self):
         return f"segments={self.segments}"
@@ -725,7 +905,6 @@ class Quadratic(RatingModel):
     --------
     >>> rating = Quadratic().fit(measurements)          # doctest: +SKIP
     >>> rating.coefficients, rating.r_squared           # doctest: +SKIP
-    >>> rating.equation()                               # doctest: +SKIP
     """
 
     def __init__(self, degree: int = 2, stage_range=None):
@@ -766,11 +945,6 @@ class Quadratic(RatingModel):
         self._require_fit()
         return self._fit.rating.turning_point
 
-    def equation(self, precision: int = 6) -> str:
-        """The fitted polynomial, written out."""
-        self._require_fit()
-        return self._fit.rating.equation(precision=precision)
-
     def _config_repr(self):
         return f"degree={self.degree}"
 
@@ -791,7 +965,7 @@ class Exponential(RatingModel):
     Examples
     --------
     >>> rating = Exponential().fit(measurements)         # doctest: +SKIP
-    >>> rating.equation(), rating.rate                   # doctest: +SKIP
+    >>> rating.amplitude, rating.rate                    # doctest: +SKIP
     """
 
     def __init__(self):
@@ -827,11 +1001,6 @@ class Exponential(RatingModel):
         """``(low, high)`` stage over which this curve may be used."""
         self._require_fit()
         return self._fit.rating.effective_range
-
-    def equation(self, precision: int = 6) -> str:
-        """The fitted curve, written out."""
-        self._require_fit()
-        return self._fit.rating.equation(precision=precision)
 
 
 def rating_model(model) -> RatingModel:
@@ -1003,7 +1172,6 @@ class RatingSet:
     ``metrics``                 fit and predictive scores, one row per model
     ``cross_validate()``        refit on subsets and score the held-out points
     ``summary()``               posterior summaries, one block per model
-    ``equation()``              each fitted curve written out, one row per model
     ``diagnostics()``           convergence diagnostics, one block per model
     ``plot(ax)``                every curve on one axis
     ``plot_residuals(ax)``      predicted / observed against stage, per model
@@ -1148,7 +1316,7 @@ class RatingSet:
             blocks.append(block)
         return (pd.concat(blocks, ignore_index=True) if blocks else
                 pd.DataFrame(columns=["model", "label", "stage_ft", "discharge_cfs",
-                                      "discharge_median_cfs", "lower", "upper"]))
+                                      "lower", "upper"]))
 
     # -- scoring and diagnostics ---------------------------------------------
 
@@ -1348,27 +1516,6 @@ class RatingSet:
             column.
         """
         return _stack_per_model(self.models, lambda model: model.diagnostics())
-
-    def equation(self, precision: int = 6) -> pd.DataFrame:
-        """Every fitted curve written out, one row per model.
-
-        Parameters
-        ----------
-        precision : int, default 6
-            Significant figures per coefficient.
-
-        Returns
-        -------
-        pandas.DataFrame
-            Columns ``model``, ``label``, ``equation``. The families with no closed
-            form are listed with an empty ``equation`` rather than dropped, so the
-            table says which models are readable this way and which are not.
-        """
-        return pd.DataFrame(
-            [{"model": model.name, "label": model.label,
-              "equation": model.equation(precision=precision)}
-             for model in self.models],
-            columns=["model", "label", "equation"])
 
     def cross_validate(self, **kwargs):
         """Refit exactly these models on subsets of this sample and score the rest.

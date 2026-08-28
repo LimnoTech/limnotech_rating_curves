@@ -8,7 +8,7 @@ and the map has no method form.
 from limnotech_rating_curves import view
 
 view.plot_site(site)
-view.build_map(sites, "ratings.html", cv_data=payload)
+view.build_map(sites, "ratings.html", cv_data={site.sample_id: cv})
 ```
 
 ## `plots.py` — matplotlib

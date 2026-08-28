@@ -62,9 +62,6 @@ dependencies = [
 [project.optional-dependencies]
 pagaia = ["fb-pagaia @ git+https://github.com/LimnoTech/fb-pagaia.git"]
 
-[project.scripts]
-rating-curves = "limnotech_rating_curves.cli:main"
-
 [project.urls]
 Homepage = "https://github.com/LimnoTech/limnotech-rating-curves"
 
@@ -79,4 +76,5 @@ testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
     "slow: runs a sampler, so it takes seconds rather than milliseconds",
+    "network: calls a live web service, so it is skipped unless LRC_NETWORK_TESTS=1",
 ]

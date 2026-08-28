@@ -11,8 +11,9 @@ from .compiled import (CompiledModel, c_upper_bound, cached_models,
                        posterior_mode)
 from .criteria import pointwise_log_likelihood, waic_from_log_likelihood
 from .defaults import (ADVI_STEPS, CFS_TO_CMS, FT_TO_M, MODELS, NUM_CHAINS,
-                       NUM_DRAWS, NUM_TUNE, NUTS_SAMPLER, SEED, TARGET_ACCEPT,
-                       theta_names)
+                       NUM_DRAWS, NUM_TUNE, NUTS_SAMPLER, SEED,
+                       SMALL_SAMPLE_N, SMALL_SAMPLE_TARGET_ACCEPT, TARGET_ACCEPT,
+                       target_accept_for, theta_names)
 from .design import (Components, b_splines, components, prediction_stages,
                      unique_stage_matrix)
 from .differences import DIFFERENCES_FROM_R
@@ -33,6 +34,7 @@ __all__ = [
     # constants
     "FT_TO_M", "CFS_TO_CMS", "NUM_DRAWS", "NUM_TUNE", "NUM_CHAINS", "ADVI_STEPS",
     "NUTS_SAMPLER", "TARGET_ACCEPT", "SEED",
+    "SMALL_SAMPLE_N", "SMALL_SAMPLE_TARGET_ACCEPT", "target_accept_for",
     "DIFFERENCES_FROM_R",
     # modules
     "defaults", "design", "graphs", "compiled", "sampling", "posterior", "criteria",

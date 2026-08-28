@@ -377,6 +377,45 @@ def reference_elevation(station: str, index) -> pd.Series:
         index, elevations[station], sensor_moves().get(station, []))
 
 
+def sensor_elevation(station: str, index, *, units: str = "ft",
+                     sensor_datum: bool = True) -> pd.Series:
+    """The elevation a station's distance readings are measured from.
+
+    Subtract a distance reading from this to get water-surface elevation.
+
+    Parameters
+    ----------
+    station : str
+        Station name with ``_WL``.
+    index : array-like
+        Timestamps to produce an elevation for.
+    units : {'ft', 'm', 'cm', 'mm'}, default 'ft'
+        Units of the returned elevation. The datum stays NAVD88.
+    sensor_datum : bool, default True
+        Apply the control-point offset, putting the elevation at the radar's own
+        face rather than the surveyed benchmark.
+
+    Returns
+    -------
+    pandas.Series
+        Elevation above NAVD88 in `units`, stepping at each sensor move.
+
+    Raises
+    ------
+    KeyError
+        If the station has no surveyed control point.
+    """
+    elevation = reference_elevation(station, index)
+    if sensor_datum:
+        try:
+            elevation = elevation - control_point_offset(station)
+        except KeyError:
+            log.info("no control-point offset for %s; leaving the sensor elevation "
+                     "on the control-point datum", station)
+    elevation = elevation * datum_module._length_factor("ft", units)
+    return elevation.rename(f"sensor_elevation_{units}")
+
+
 # ---------------------------------------------------------------------------
 # the distance record: spreadsheet + pagaia
 # ---------------------------------------------------------------------------
@@ -528,7 +567,7 @@ def pagaia_distance_ft(station: str, start=None, end=None,
     if start is None or end is None:
         return pd.Series(dtype=float, name=station)
 
-    from . import pagaia
+    from . import pagaia, pagaia_corrections
     if not pagaia.installed():
         log.info("fb_pagaia is not installed, so %s uses the spreadsheet record only "
                  "(%s)", station, pagaia.INSTALL_HINT)
@@ -540,8 +579,15 @@ def pagaia_distance_ft(station: str, start=None, end=None,
         log.warning("pagaia unavailable for %s (%s); using the spreadsheet record",
                     station, type(exc).__name__)
         return pd.Series(dtype=float, name=station)
-    return pagaia.station_series(loaded, variable="distance", start=start,
-                                       end=end, units="ft", refresh=refresh)
+
+    # Three steps, deliberately spelled out: fetch what the database holds, correct
+    # the units it misreports, then convert. See
+    # limnotech_rating_curves.data.pagaia_corrections.
+    raw = pagaia.raw_station_series(loaded, variable="distance", start=start,
+                                    end=end, refresh=refresh)
+    meters = pagaia_corrections.to_meters(raw, pagaia.station_name(loaded),
+                                          variable="distance")
+    return datum_module.in_units(meters, "ft").rename(station)
 
 
 def distance_record_ft(station: str, start=None, end=None,
@@ -556,7 +602,10 @@ def distance_record_ft(station: str, start=None, end=None,
     station : str
         Station name with ``_WL``.
     start, end : str or datetime, optional
-        Window for the pagaia part.
+        Window for the pagaia part. Defaults to the tail the spreadsheet does not
+        cover: from its last reading (or `MAGL_RECORD_START` when it has none) to
+        today. pagaia's API needs both ends, so leaving them out used to skip the
+        database entirely and silently end the record with the spreadsheet.
     quality_controlled : bool, default True
         Apply the spreadsheet's QA/QC flag.
     refresh : bool, default False
@@ -569,11 +618,20 @@ def distance_record_ft(station: str, start=None, end=None,
     """
     spreadsheet = spreadsheet_distance_ft(station,
                                          quality_controlled=quality_controlled)
+    if start is None:
+        start = (spreadsheet.index.max() if not spreadsheet.empty
+                 else pd.Timestamp(MAGL_RECORD_START))
+    if end is None:
+        end = pd.Timestamp.now().normalize() + pd.Timedelta(days=1)
     database = pagaia_distance_ft(station, start, end, refresh=refresh)
     if spreadsheet.empty:
         return database
     if database.empty:
         return spreadsheet
+    # pagaia supplies the tail, never the interior. Without this, asking for a window
+    # inside the spreadsheet's span lets pagaia fill gaps the QA/QC flag opened, so
+    # the same instant reads differently depending on the window requested.
+    database = database[database.index > spreadsheet.index.max()]
     return _clean_series(spreadsheet.combine_first(database)).rename(station)
 
 

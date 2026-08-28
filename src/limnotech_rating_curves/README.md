@@ -35,8 +35,8 @@ ratings.best.plot()
 | `compare(data, models=None)` | Fit several, return a `RatingSet` (alias: `lrc.fit`) |
 | `rating_model(name)`, `resolve_models(models)` | Build unfitted estimators from names |
 | `PowerLaw`, `Spline`, `Bdrc`, `Quadratic`, `Exponential` | The estimator classes |
-| `RatingModel` | Shared surface: `.predict`, `.interval`, `.curve`, `.metrics`, `.equation`, `.summary`, `.diagnostics`, `.pareto_k`, `.zero_flow`, `.cross_validate`, `.save_posterior`, `.plot`, `.plot_residuals`, `.plot_check` |
-| `RatingSet` | `.best`, `.metrics`, `.ranking`, `.curve`, `.predict`, `.interval`, `.equation`, `.summary`, `.diagnostics`, `.cross_validate`, `.plot`, `.plot_residuals`, `.plot_ranking` |
+| `RatingModel` | Shared surface: `.predict`, `.interval`, `.curve`, `.metrics`, `.summary`, `.diagnostics`, `.pareto_k`, `.zero_flow`, `.cross_validate`, `.save_posterior`, `.plot`, `.plot_residuals`, `.plot_check` |
+| `RatingSet` | `.best`, `.metrics`, `.ranking`, `.curve`, `.predict`, `.interval`, `.summary`, `.diagnostics`, `.cross_validate`, `.plot`, `.plot_residuals`, `.plot_ranking` |
 
 `Quadratic` and `Exponential` add spreadsheet-facing extras: `.coefficients`,
 `.r_squared`, `.r_squared_log`, `.effective_range`, `.turning_point`.

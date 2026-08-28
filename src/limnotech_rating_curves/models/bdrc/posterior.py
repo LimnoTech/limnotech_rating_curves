@@ -187,10 +187,30 @@ class BdrcFit:
     run_info: dict = field(default_factory=dict)
 
     def predict(self, newdata=None) -> pd.DataFrame:
-        """Discharge quantiles at `newdata` (stage in m), by linear interpolation of
-        the fitted curve - R's predict.plm0 / predict.gplm0. Stages outside the
-        curve return 0, and stages above its maximum are an error (raise `h_max` at
-        fit time to extrapolate)."""
+        """Posterior *predictive* discharge quantiles at `newdata` (stage in m).
+
+        By linear interpolation of the fitted curve - R's predict.plm0 /
+        predict.gplm0. Each draw carries a simulated gaging error, so these bounds
+        say where a future measurement would fall. Stages outside the curve return 0,
+        and stages above its maximum are an error (raise `h_max` at fit time to
+        extrapolate)."""
+        return self._interpolate(newdata, self.rating_curve,
+                                 ("lower", "median", "upper"))
+
+    def predict_posterior(self, newdata=None) -> pd.DataFrame:
+        """The rating itself at `newdata` (stage in m), without gaging scatter.
+
+        The same three quantiles as :meth:`predict`, plus ``mean``, taken from the
+        posterior of the model's mean function rather than from its posterior
+        predictive. These say where the rating is; :meth:`predict` says where the
+        next measurement would fall. See ``posterior_clarification.md``."""
+        summary = self.rating_curve_mean.copy()
+        summary["mean"] = self.rating_curve_mean_posterior.mean(axis=1)
+        return self._interpolate(newdata, summary,
+                                 ("lower", "median", "upper", "mean"))
+
+    def _interpolate(self, newdata, summary, columns) -> pd.DataFrame:
+        """`summary`'s columns at `newdata`, linearly interpolated over ``self.h``."""
         if newdata is None:
             newdata = self.h
         newdata = np.asarray(newdata, float)
@@ -200,8 +220,8 @@ class BdrcFit:
             raise ValueError("newdata must lie within the fitted stage range; use "
                              "h_max at fit time to extrapolate to higher stages")
         out = pd.DataFrame({"h": newdata})
-        for column in ("lower", "median", "upper"):
-            interpolated = np.interp(newdata, self.h, self.rating_curve[column],
+        for column in columns:
+            interpolated = np.interp(newdata, self.h, summary[column],
                                      left=np.nan, right=np.nan)
             out[column] = np.nan_to_num(interpolated, nan=0.0)
         return out

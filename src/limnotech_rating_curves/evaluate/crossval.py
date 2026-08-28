@@ -190,7 +190,8 @@ class CrossValidation:
     seed : int
         The base seed used.
     fold_method : str
-        How folds were fitted - ``"advi"`` by default. Folds carry no ELPD.
+        How folds were fitted - ``"nuts"`` by default. Folds carry no ELPD either
+        way: a fold is scored on its held-out points, not by PSIS-LOO.
     """
 
     scheme: dict
@@ -201,7 +202,7 @@ class CrossValidation:
     support: dict = field(default_factory=dict)
     failures: dict = field(default_factory=dict)
     seed: int = settings.SEED
-    fold_method: str = "advi"
+    fold_method: str = "nuts"
 
     @property
     def headline(self) -> pd.DataFrame:
@@ -310,7 +311,7 @@ class CrossValidation:
 def cross_validate(sample, models=None, *, discharge=None, stage=None,
                    stage_datum=None, scheme: str = "auto", holdout=None,
                    n_splits=None, n_train=None, seed: int = settings.SEED,
-                   fold_method: str = "advi", zero_flow=None,
+                   fold_method: str = "nuts", zero_flow=None,
                    nuts_sampler=None) -> CrossValidation:
     """Refit each model on subsets of the measurements and score the held-out ones.
 
@@ -344,15 +345,19 @@ def cross_validate(sample, models=None, *, discharge=None, stage=None,
         Explicit training-set size, overriding `holdout`.
     seed : int
         Base seed. Fold *k* is fitted with ``seed + k``.
-    fold_method : {'advi', 'nuts'}, default 'advi'
-        How to fit each fold. ADVI because a sweep is many refits; note that folds
-        therefore carry no ELPD.
+    fold_method : {'nuts', 'advi'}, default 'nuts'
+        How to fit each fold. NUTS by default, because a fold is smaller than the
+        sample it came from and ADVI's normal approximation is least trustworthy
+        exactly there. ``"advi"`` trades that for speed and is worth it on a large
+        sweep whose folds are still comfortably sized. Folds carry no ELPD either
+        way.
     zero_flow : optional
         Stage-of-zero-flow handling, forwarded to each fit. See
         :meth:`limnotech_rating_curves.ratings.RatingModel.fit`.
     nuts_sampler : str, optional
-        Which NUTS implementation, for the models whose folds are NUTS chains
-        (bdrc's are, even when `fold_method` is ADVI for the others).
+        Which NUTS implementation. bdrc's folds are NUTS chains whatever
+        `fold_method` says, so this applies even when the others are fitted by
+        ADVI.
 
     Returns
     -------
@@ -459,8 +464,7 @@ def pooled_metrics(curves) -> pd.DataFrame:
     -------
     pandas.DataFrame
         Indexed by model, with ``n_predictions``, ``n_dropped`` (predictions that
-        fell outside the fold curve's support), ``rmse``, ``nse``, ``pbias_pct`` and
-        ``r2_log``.
+        fell outside the fold curve's support), ``rmse``, ``nse`` and ``r2_log``.
     """
     grouped: dict = {}
     for curve in curves:
@@ -477,7 +481,7 @@ def pooled_metrics(curves) -> pd.DataFrame:
         rows[model] = {"n_predictions": int(usable.sum()),
                        "n_dropped": int((~usable).sum()),
                        "rmse": scores["rmse"], "nse": scores["nse"],
-                       "pbias_pct": scores["pbias_pct"], "r2_log": scores["r2_log"]}
+                       "r2_log": scores["r2_log"]}
     table = pd.DataFrame.from_dict(rows, orient="index")
     if not table.empty:
         table.index.name = "model"

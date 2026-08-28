@@ -10,12 +10,41 @@ from ..data.zero_flow import ZeroFlowEstimate, estimate_zero_flow
 
 log = logging.getLogger(__name__)
 
-#: Column names ratingcurve's own table uses, mapped to this package's names.
-_TABLE_RENAME = {"stage": "stage_ft", "discharge": "discharge_cfs",
-                 "median": "discharge_median_cfs"}
+#: Column names ratingcurve's own table uses, mapped to this package's names. Both of
+#: its summaries are of the posterior *predictive*, so both are labelled as such;
+#: ``discharge_cfs`` is added separately from the rating itself.
+_TABLE_RENAME = {"stage": "stage_ft",
+                 "discharge": "discharge_predictive_mean_cfs",
+                 "median": "discharge_predictive_median_cfs"}
 
 #: Standard-normal quantile for a 95% interval.
 _Z95 = 1.959963984540054
+
+#: The form :meth:`BayesianRating.equation` returns parameters for, written out so a
+#: caller reading ``a``, ``b`` and ``hs`` cannot mistake which notation they belong to.
+#: This is ratingcurve's own documented form. ASCII deliberately: it goes into CSVs,
+#: terminals and report text, where a Greek sigma or a subscript may not survive.
+POWER_LAW_FORM = "ln(q) = a + sum(b[i] * ln(max(h - hs[i], 0) + ho[i]))"
+
+#: Significant figures in the substituted equation string. Six matches what the
+#: parameters are worth: the posterior mean of a breakpoint is not known to more.
+_EQUATION_PRECISION = 6
+
+
+def _substituted_form(intercept, exponents, breakpoints, offsets) -> str:
+    """:data:`POWER_LAW_FORM` with the fitted values in place of the symbols.
+
+    Written to be read literally: every ``ho[i]`` is resolved to the ``+ 1`` it stands
+    for, or dropped where it is zero, so the line needs no key to interpret.
+    """
+    precision = _EQUATION_PRECISION
+    terms = []
+    for exponent, breakpoint_, offset in zip(exponents, breakpoints, offsets):
+        head = f"max(h - {breakpoint_:.{precision}g}, 0)"
+        if offset:
+            head += f" + {offset:.{precision}g}"
+        terms.append(f"{exponent:.{precision}g} * ln({head})")
+    return f"ln(q) = {intercept:.{precision}g} + " + " + ".join(terms)
 
 
 #: Attribute value types NetCDF can store. Anything else has to be encoded.
@@ -28,13 +57,8 @@ def coerced_netcdf_attrs(idata):
     """Temporarily JSON-encode any posterior attributes NetCDF cannot store.
 
     NetCDF attributes must be strings, numbers or arrays. Samplers write richer
-    things - nutpie records its entire settings tree as a nested dict under
-    ``sample_stats`` - and xarray refuses the whole file rather than that one
-    attribute. Those attributes are provenance, not data, so encoding them as JSON
-    keeps the information and lets the write succeed.
-
-    The original attributes are restored on exit, so an in-memory posterior is
-    unchanged by having been saved.
+    things into the posterior's ``attrs`` dict, which NetCDF cannot store, so they
+    are encoded as JSON instead.
 
     Parameters
     ----------
@@ -181,7 +205,10 @@ class BayesianRating:
             Show the sampler's progress bar.
         **sampler_kwargs
             Passed through to the sampler (``draws``, ``tune``, ``chains``,
-            ``cores``, ``nuts_sampler``, ``n`` for ADVI).
+            ``cores``, ``target_accept``, ``nuts_sampler``, ``n`` for ADVI).
+            ratingcurve's own defaults apply to anything not named here; the
+            package-level :func:`fit` fills in ``target_accept`` from the sample
+            size, so a short record does not need it set by hand.
 
         Returns
         -------
@@ -221,6 +248,85 @@ class BayesianRating:
         predicted = np.asarray(self.model.predict(padded), float).ravel()
         return predicted[:1] if stages.size == 1 else predicted
 
+    def posterior_draws(self, stage) -> np.ndarray:
+        """Draws of the fitted rating itself, without gaging scatter.
+
+        ``predict_posterior`` draws from the likelihood, so each of its draws is the
+        rating *plus* a simulated field-measurement error. These are draws of the
+        rating alone: the model's mean function evaluated at each posterior draw of
+        the parameters.
+
+        The two differ once discharge leaves log space. A measurement error that is
+        symmetric in logs is not symmetric in cfs, so averaging ``predict_posterior``
+        gives the rating multiplied by ``exp(sigma ** 2 / 2)`` rather than the rating.
+        Their medians agree, which is what
+        ``tests/test_posterior_mean.py`` checks. See ``posterior_clarification.md``.
+
+        Parameters
+        ----------
+        stage : array-like
+            Gage height (feet).
+
+        Returns
+        -------
+        numpy.ndarray
+            Discharge (cfs), shaped ``(stages, draws)`` as ``predict_posterior`` is.
+            A draw whose stage of zero flow sits above the stage gives exactly zero,
+            the same value ``predict_posterior`` reports there.
+        """
+        stages = np.atleast_1d(np.asarray(stage, float)).ravel()
+        return self.model.q_transform.untransform(self._mean_log_z(stages))
+
+    def posterior_mean(self, stage) -> np.ndarray:
+        """Posterior-mean discharge of the fitted rating, ``E[exp(mu)]``.
+
+        The mean of :meth:`posterior_draws`. Averages over everything the fit leaves
+        uncertain about the curve, and nothing else - unlike :meth:`predict`, which
+        also folds in the error of a hypothetical future gaging.
+
+        Parameters
+        ----------
+        stage : array-like
+            Gage height (feet).
+
+        Returns
+        -------
+        numpy.ndarray
+            Discharge (cfs), one value per requested stage.
+        """
+        return np.asarray(self.posterior_draws(stage), float).mean(axis=1)
+
+    def _mean_log_z(self, stages) -> np.ndarray:
+        """The model's mean function at `stages`, in the standardized log space it is
+        sampled in, shaped ``(stages, draws)``.
+
+        Mirrors the mean each algorithm hands to its likelihood, so the two cannot
+        drift apart: the power law's ``a + dot(b, X)`` and the spline's ``dot(B, w)``.
+        """
+        posterior = self.idata.posterior
+        flatten = lambda name: (posterior[name]
+                                .stack(sample=("chain", "draw")).values)
+
+        if self.algorithm == "spline":
+            # The design matrix is the same for every draw, so it is built once from
+            # the very Dmatrix the fit used rather than reassembled here.
+            basis = np.asarray(self.model.d_transform(stages), float)
+            return basis @ flatten("w")
+
+        # (segments, draws) for both; hs carries a trailing length-1 axis
+        exponents = flatten("b").reshape(self.model.segments, -1)
+        breakpoints = flatten("hs").reshape(self.model.segments, -1)
+        intercept = flatten("a")
+        offsets = np.asarray(self.model.ho, float).reshape(-1, 1, 1)
+
+        # log(max(h - hs, 0) + ho), the model's own X, per draw
+        depth = np.clip(stages[None, None, :] - breakpoints[:, :, None], 0, None)
+        with np.errstate(divide="ignore"):
+            basis = np.log(depth + offsets)
+        # sum over segments -> (draws, stages), then to (stages, draws)
+        return (intercept[:, None]
+                + np.einsum("sd,sdx->dx", exponents, basis)).T
+
     def table(self, stage=None, step: float = 0.01, extend: float = 1.1) -> pd.DataFrame:
         """The fitted rating as a tidy table with its uncertainty.
 
@@ -237,12 +343,27 @@ class BayesianRating:
         Returns
         -------
         pandas.DataFrame
-            Columns ``stage_ft``, ``discharge_cfs`` (posterior mean),
-            ``discharge_median_cfs``, ``gse`` (geometric standard error),
-            ``lower`` and ``upper`` (the 95% interval, ``median * gse**±1.96``).
+            Columns ``stage_ft``; ``discharge_cfs``, the posterior mean of the rating
+            (:meth:`posterior_mean`); ``discharge_posterior_median_cfs``,
+            ``posterior_lower`` and ``posterior_upper``, the median and 95% interval
+            of the rating itself (:meth:`posterior_draws`);
+            ``discharge_predictive_mean_cfs`` and
+            ``discharge_predictive_median_cfs``, the two summaries ratingcurve reports
+            of the posterior *predictive*; ``gse`` (geometric standard error); and
+            ``lower`` and ``upper`` (the 95% predictive interval,
+            ``median * gse**±1.96``).
+
+            The two interval pairs answer different questions: ``posterior_lower`` /
+            ``posterior_upper`` say where the rating is, and ``lower`` / ``upper`` say
+            where the next gaging would fall. The second is always the wider.
 
         Notes
         -----
+        ``discharge_cfs`` is the rating, not the posterior predictive mean. The two
+        differ by ``exp(sigma ** 2 / 2)`` - negligible where sigma is small, and
+        unbounded where it is not. The predictive mean is still reported, in its own
+        column. See ``posterior_clarification.md``.
+
         ``ratingcurve.table`` drops every row whose mean discharge exceeds
         ``extend`` times the largest measured discharge, which cuts a curve off
         below the top of the stage grid it was asked for. When `stage` is given the
@@ -258,8 +379,13 @@ class BayesianRating:
                 stage = np.repeat(stage, 2)   # see predict(): keeps the basis 2-D
             table = self._posterior_table(stage)
         table = table.rename(columns=_TABLE_RENAME).reset_index(drop=True)
-        median = table["discharge_median_cfs"].to_numpy(float)
+        median = table["discharge_predictive_median_cfs"].to_numpy(float)
         gse = table["gse"].to_numpy(float)
+        draws = self.posterior_draws(table["stage_ft"].to_numpy(float))
+        table["discharge_cfs"] = draws.mean(axis=1)
+        table["discharge_posterior_median_cfs"] = np.median(draws, axis=1)
+        table["posterior_lower"], table["posterior_upper"] = np.percentile(
+            draws, [2.5, 97.5], axis=1)
         table["lower"] = median * gse ** (-_Z95)
         table["upper"] = median * gse ** _Z95
         return table.sort_values("stage_ft").reset_index(drop=True)
@@ -286,66 +412,81 @@ class BayesianRating:
             "median": np.median(posterior, axis=1),
             "gse": np.where(positive.all(axis=1), gse, np.nan)})
 
-    def coefficients(self) -> dict:
-        """The fitted power law's coefficients, in discharge units.
+    def equation(self) -> dict:
+        """The denormalized power-law parameters, in ratingcurve's own form.
 
-        ratingcurve fits ``(log Q - mean) / std``, so the ``a`` and ``b`` in
-        :meth:`summary` are on that standardized scale and are not a rating curve as
-        written. This undoes the transform and returns the closed form instead.
+        A passthrough to ``ratingcurve``'s :meth:`PowerLawRating.equation`, which
+        undoes the standardization the model fits in and returns the parameters of
+
+        .. math::
+
+            \\ln q = a + \\sum_i b_i \\ln\\!\\big(\\max(h - hs_i,\\,0) + ho_i\\big)
+
+        with :math:`ho_0 = 0` and :math:`ho_i = 1` for :math:`i > 0`.
+
+        This is the log-space form the upstream package documents and tests, and the
+        only form this package reports. It is exposed unchanged so a caller can quote
+        the same parameters the library does. Exponentiating it gives the equivalent
+        multiplicative form,
+
+        .. math::
+
+            Q = e^{a}\\,(h - hs_0)^{b_0}
+                \\prod_{i>0} \\big(1 + \\max(h - hs_i,\\,0)\\big)^{b_i},
+
+        which is left to the caller rather than returned as a second dict of numbers:
+        one set of parameters, in one notation, cannot be quoted against the wrong
+        form.
 
         Returns
         -------
         dict
-            ``coefficient`` (:math:`C`), ``exponents`` (:math:`\\beta`, one per
-            segment) and ``breakpoints`` (feet, one per segment; the first is the
-            stage of zero flow :math:`e`), such that
+            The parameters, exactly as upstream returns them:
 
-            .. math::
+            ``a``
+                Float intercept.
+            ``b``
+                Exponent per segment.
+            ``hs``
+                Breakpoint stage per segment.
 
-                Q = C\\,(h - e)^{\\beta_0}
-                    \\prod_{i>0} (1 + \\max(h - hs_i, 0))^{\\beta_i}
+            and, so the numbers cannot be misread, the notation they belong to:
 
-            Empty for a family with no closed form (the spline), and before the fit.
+            ``ho``
+                The offset per segment that the form refers to - ``0`` for the first
+                segment and ``1`` thereafter. Returned rather than left to the reader
+                so the dict can be evaluated without consulting this docstring.
+            ``symbolic``
+                The form itself, as text:
+                ``"ln(q) = a + sum(b[i] * ln(max(h - hs[i], 0) + ho[i]))"``.
+            ``numeric``
+                The same with the fitted values substituted in, to six significant
+                figures - the line to quote in a report.
+
+            Empty for the spline, which has no such form, and before the fit.
 
         Notes
         -----
-        These are the posterior *mean* parameters, so the curve through them is the
-        curve at the mean parameters - close to the ``discharge_median_cfs`` column
-        of :meth:`table`, and about ``exp(sigma**2 / 2)`` below the
-        ``discharge_cfs`` column, which is the mean of the posterior predictive
-        draws in cfs. The difference is a fraction of a percent on a typical fit,
-        but it is not zero, so use :meth:`predict` where the mean is what is wanted.
-
-        With more than one segment there is a second, larger discrepancy, and it is
-        confined to the neighborhood of a breakpoint: this curve puts one sharp kink
-        at the mean breakpoint, while the draws put theirs at different stages and
-        average into a smeared one. Measured on a 20-point fit, the two agreed to
-        about 1% everywhere except within a few tenths of a foot of the breakpoint,
-        where the closed form ran 13% high. Read a segmented curve near its kink off
-        :meth:`table`, not off these coefficients.
+        These are posterior *mean* parameters - the equation evaluated at the average
+        of the draws, which is not the average of the evaluated equation. The curve
+        they describe tracks the ``discharge_predictive_median_cfs`` column of
+        :meth:`table` more closely than ``discharge_cfs``, and it puts one sharp kink
+        at the mean breakpoint where the draws smear theirs over a range of stages.
+        Upstream's own test allows 15% for exactly this reason. Read a segmented curve
+        near its kink off :meth:`table`, not off these parameters.
         """
         if self.algorithm != "power_law" or not self.fitted:
             return {}
         params = self.model.equation()
-        return {"coefficient": float(np.exp(params["a"])),
-                "exponents": np.asarray(params["b"], float).ravel(),
-                "breakpoints": np.asarray(params["hs"], float).ravel()}
-
-    def equation(self, precision: int = 6) -> str:
-        """The fitted power law, written out.
-
-        Parameters
-        ----------
-        precision : int, default 6
-            Significant figures per coefficient.
-
-        Returns
-        -------
-        str
-            e.g. ``"Q = 182.16 (h - 5.12323)^1.46971"``. Empty for a family with no
-            closed form, and before the fit.
-        """
-        return format_power_law(self.coefficients(), precision=precision)
+        intercept = float(params["a"])
+        exponents = np.asarray(params["b"], float).ravel()
+        breakpoints = np.asarray(params["hs"], float).ravel()
+        offsets = np.ones(exponents.size)
+        offsets[0] = 0.0
+        return {"a": intercept, "b": exponents, "hs": breakpoints, "ho": offsets,
+                "symbolic": POWER_LAW_FORM,
+                "numeric": _substituted_form(intercept, exponents, breakpoints,
+                                             offsets)}
 
     def summary(self, var_names=None) -> pd.DataFrame:
         """ArviZ posterior summary of the fitted parameters.
@@ -402,44 +543,6 @@ class BayesianRating:
         with coerced_netcdf_attrs(self.idata):
             self.model.save(str(path))
         return str(path)
-
-
-def format_power_law(coefficients: dict, precision: int = 6) -> str:
-    """Write a segmented power law's coefficients as an equation.
-
-    Parameters
-    ----------
-    coefficients : dict
-        What :meth:`BayesianRating.coefficients` returns. An empty dict gives an
-        empty string, so a family with no closed form needs no special case.
-    precision : int, default 6
-        Significant figures per coefficient.
-
-    Returns
-    -------
-    str
-        ``"Q = 182.16 (h - 5.12323)^1.46971"`` for a single segment, with one
-        ``(1 + max(h - hs, 0))^beta`` factor appended per further segment - the
-        Heaviside parameterization ratingcurve fits, in which each later exponent
-        is the *added* slope above its breakpoint rather than an absolute one.
-    """
-    if not coefficients:
-        return ""
-    exponents = np.asarray(coefficients["exponents"], float).ravel()
-    breakpoints = np.asarray(coefficients["breakpoints"], float).ravel()
-    factors = [f"({_effective_head(breakpoints[0], precision)})"
-               f"^{exponents[0]:.{precision}g}"]
-    for breakpoint, exponent in zip(breakpoints[1:], exponents[1:]):
-        factors.append(f"(1 + max({_effective_head(breakpoint, precision)}, 0))"
-                       f"^{exponent:.{precision}g}")
-    return (f"Q = {coefficients['coefficient']:.{precision}g} "
-            + " ".join(factors))
-
-
-def _effective_head(breakpoint: float, precision: int) -> str:
-    """``h - 5.12`` or ``h + 0.31``, so a negative breakpoint reads correctly."""
-    sign = "-" if breakpoint >= 0 else "+"
-    return f"h {sign} {abs(breakpoint):.{precision}g}"
 
 
 def breakpoint_prior(stage, discharge, segments: int, zero_flow=None) -> dict:
@@ -578,8 +681,9 @@ def adapt_config(algorithm: str, segments, min_points: int, n: int, *,
 def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
         min_points: int = 3, method: str = "nuts", seed: int = settings.SEED,
         cores=None, advi_iters: int = settings.ADVI_ITERS,
-        nuts_sampler: str = None, zero_flow=None, enforce_min_points: bool = True,
-        config_override=None, grid=None) -> FitResult:
+        nuts_sampler: str = None, target_accept: float = None, zero_flow=None,
+        enforce_min_points: bool = True, config_override=None,
+        with_log_likelihood: bool = True, grid=None) -> FitResult:
     """Fit one ratingcurve model to one sample. Never raises.
 
     Any failure is captured in the returned result's ``status`` and ``reason``, so
@@ -614,6 +718,10 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
         Which NUTS implementation (see ``settings.NUTS_SAMPLERS``). Recorded on
         the result, because ratingcurve builds its own stored sampler config
         before this keyword is merged in and so never sees it.
+    target_accept : float, optional
+        NUTS target acceptance rate. ``None`` (the default) resolves it from the
+        sample size with :func:`settings.target_accept_for`, which raises it for a
+        short record; pass a number to sample at that rate regardless.
     zero_flow : None or float or ZeroFlowEstimate or str, optional
         Stage of zero flow to center the breakpoint prior on; see
         :func:`breakpoint_prior`. Power-law family only.
@@ -622,6 +730,15 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
     config_override : dict, optional
         Merged over the adapted config, so a caller can pin e.g. the spline's
         ``df`` instead of taking the automatic choice.
+    with_log_likelihood : bool, default True
+        Compute the pointwise log-likelihood immediately after sampling, while the
+        model still holds the data it was fitted on. This has to happen here rather
+        than on demand: ratingcurve's ``predict`` sets new stage data on the PyMC
+        model and leaves it there, so a later
+        :func:`~limnotech_rating_curves.evaluate.metrics.ensure_log_likelihood` would
+        try to score the fitted observations against whatever stages were predicted
+        last, and fail on the shape mismatch. Turn it off only to save the time and
+        memory when the fit will never be scored.
     grid : array-like, optional
         Stage grid the fitted curve is tabulated on. Defaults to a padded grid
         over the observed range, the same one bdrc and the least-squares forms
@@ -637,6 +754,8 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
     discharge = frame["discharge_cfs"].to_numpy(float)
     n = len(frame)
     nuts_sampler = settings.NUTS_SAMPLER if nuts_sampler is None else nuts_sampler
+    target_accept = (settings.target_accept_for(n) if target_accept is None
+                     else float(target_accept))
 
     should_fit, config, reason = adapt_config(
         algorithm, segments, min_points, n, enforce_min_points=enforce_min_points)
@@ -654,11 +773,13 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
             result.config = {**result.config, "method": "advi", "advi_iters": advi_iters}
         else:
             sampler_kwargs = {"draws": settings.NUTS_DRAWS, "tune": settings.NUTS_TUNE,
-                              "nuts_sampler": nuts_sampler}
+                              "nuts_sampler": nuts_sampler,
+                              "target_accept": target_accept}
             if cores is not None:
                 sampler_kwargs["cores"] = cores
             result.config = {**result.config, "method": "nuts",
-                             "nuts_sampler": nuts_sampler}
+                             "nuts_sampler": nuts_sampler,
+                             "target_accept": target_accept}
 
         model_kwargs = dict(config)
         if algorithm == "power_law":
@@ -672,6 +793,17 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
         rating = BayesianRating(algorithm, **model_kwargs)
         rating.fit(stage, discharge, method=method, seed=seed, **sampler_kwargs)
 
+        # Before table() or predict(), both of which push new stage data onto the
+        # model and leave it there. ADVI fits are not scored by policy, so there is
+        # nothing to compute for them.
+        if with_log_likelihood and method != "advi":
+            from ..evaluate.metrics import ensure_log_likelihood
+            try:
+                ensure_log_likelihood(rating)
+            except Exception as exc:  # noqa: BLE001 - scoring is not the fit
+                log.info("%s: could not attach a log-likelihood (%s: %s)",
+                         key, type(exc).__name__, exc)
+
         table = rating.table(stage=padded_stage_grid(stage) if grid is None
                              else np.asarray(grid, float))
         # the grid is padded below the measurements, and a power law has no discharge
@@ -679,11 +811,14 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
         # as zero or infinity, which is where bdrc's curve stops too
         drawable = np.isfinite(table["discharge_cfs"]) & (table["discharge_cfs"] > 0)
         table = table[drawable].reset_index(drop=True)
-        predicted = rating.predict(stage)
+        predicted = rating.posterior_mean(stage)
         result.rating = rating
         result.idata = rating.idata
-        result.curve = table[["stage_ft", "discharge_cfs", "discharge_median_cfs",
-                              "lower", "upper"]]
+        result.curve = table[["stage_ft", "discharge_cfs",
+                              "discharge_posterior_median_cfs",
+                              "posterior_lower", "posterior_upper",
+                              "discharge_predictive_mean_cfs",
+                              "discharge_predictive_median_cfs", "lower", "upper"]]
         result.predicted = predicted
         result.metrics = fit_metrics(discharge, predicted)
         result.status = "ok"

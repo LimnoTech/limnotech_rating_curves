@@ -194,8 +194,8 @@ class RatingCurveEntry(ModelEntry):
     def fit(self, sample, *, method: str = "nuts", seed: int = settings.SEED,
             enforce_min_points: bool = True, zero_flow=None, cores=None,
             advi_iters: int = settings.ADVI_ITERS, nuts_sampler=None,
-            config_override=None, with_log_likelihood: bool = False, grid=None
-            ) -> FitResult:
+            target_accept=None, config_override=None,
+            with_log_likelihood: bool = False, grid=None) -> FitResult:
         """Fit on all of a sample.
 
         Parameters
@@ -217,6 +217,10 @@ class RatingCurveEntry(ModelEntry):
             ADVI optimization steps.
         nuts_sampler : str, optional
             Which NUTS implementation.
+        target_accept : float, optional
+            NUTS target acceptance rate. ``None`` resolves it from the sample
+            size, which raises it for a short record; see
+            :func:`limnotech_rating_curves.settings.target_accept_for`.
         config_override : dict, optional
             Merged over the adapted model config.
         grid : array-like, optional
@@ -235,12 +239,14 @@ class RatingCurveEntry(ModelEntry):
             sample, key=self.key, label=self.label, algorithm=self.algorithm,
             segments=self.segments, min_points=self.min_points, method=method,
             seed=seed, cores=cores, advi_iters=advi_iters,
-            nuts_sampler=nuts_sampler, zero_flow=zero_flow,
+            nuts_sampler=nuts_sampler, target_accept=target_accept,
+            zero_flow=zero_flow,
             enforce_min_points=enforce_min_points, config_override=config_override,
+            with_log_likelihood=with_log_likelihood,
             grid=_padded_grid(sample) if grid is None else grid)
 
     def fit_fold(self, train, test, grid, split, *, seed: int = settings.SEED,
-                 zero_flow=None, nuts_sampler=None, method: str = "advi"
+                 zero_flow=None, nuts_sampler=None, method: str = "nuts"
                  ) -> "FoldCurve | None":
         """Fit one cross-validation fold and score it on the held-out points.
 
@@ -258,12 +264,14 @@ class RatingCurveEntry(ModelEntry):
         zero_flow : optional
             Stage of zero flow for the breakpoint prior.
         nuts_sampler : str, optional
-            Ignored here: a ratingcurve fold is fitted by ADVI, which is gradient
-            ascent on the ELBO and not a NUTS chain at all. bdrc folds *are* NUTS,
-            so it matters there and the argument exists for symmetry.
-        method : {'advi', 'nuts'}, default 'advi'
-            Fold fitting method. ADVI by default because a fold sweep is about
-            visual robustness across many refits, not about ELPD.
+            Which NUTS implementation. Used unless `method` is ``"advi"``, which
+            is gradient ascent on the ELBO and not a NUTS chain at all.
+        method : {'nuts', 'advi'}, default 'nuts'
+            Fold fitting method. NUTS by default: a fold is smaller than the
+            sample it came from, and on a short record ADVI's normal
+            approximation to a ridged posterior is the fit most likely to be
+            wrong. ``"advi"`` is much faster and is the choice for a large sweep
+            where each fold still has plenty of measurements.
 
         Returns
         -------
@@ -273,15 +281,19 @@ class RatingCurveEntry(ModelEntry):
         fit = ratingcurve.fit(
             train, key=self.key, label=self.label, algorithm=self.algorithm,
             segments=self.segments, min_points=self.min_points, method=method,
-            seed=seed, zero_flow=zero_flow, enforce_min_points=False)
+            seed=seed, nuts_sampler=nuts_sampler, zero_flow=zero_flow,
+            enforce_min_points=False)
         if not fit.ok or fit.rating is None:
             return None
         table = fit.rating.table(stage=np.asarray(grid, float))
-        predicted = fit.rating.predict(test["stage_ft"].to_numpy(float))
+        # the rating, not the posterior predictive: a held-out score must not carry
+        # the exp(sigma**2 / 2) inflation of a hypothetical future gaging error
+        # (see posterior_clarification.md)
+        predicted = fit.rating.posterior_mean(test["stage_ft"].to_numpy(float))
         return FoldCurve(
             model_key=self.key, split=split,
             stage_ft=table["stage_ft"].tolist(),
-            discharge_median_cfs=table["discharge_median_cfs"].tolist(),
+            discharge_median_cfs=table["discharge_posterior_median_cfs"].tolist(),
             lower_cfs=table["lower"].tolist(), upper_cfs=table["upper"].tolist(),
             train_stage=train["stage_ft"].tolist(),
             train_discharge=train["discharge_cfs"].tolist(),
@@ -353,8 +365,8 @@ class BdrcEntry(ModelEntry):
     def fit(self, sample, *, method: str = "nuts", seed: int = settings.SEED,
             enforce_min_points: bool = True, zero_flow=None, cores=None,
             advi_iters: int = settings.ADVI_ITERS, nuts_sampler=None,
-            config_override=None, with_log_likelihood: bool = False, grid=None
-            ) -> FitResult:
+            target_accept=None, config_override=None,
+            with_log_likelihood: bool = False, grid=None) -> FitResult:
         """Fit on all of a sample.
 
         Parameters
@@ -382,6 +394,10 @@ class BdrcEntry(ModelEntry):
             ADVI optimization steps.
         nuts_sampler : str, optional
             Which NUTS implementation.
+        target_accept : float, optional
+            NUTS target acceptance rate. ``None`` resolves it from the sample
+            size with :func:`bdrc.target_accept_for`, which raises it for a short
+            record.
         config_override : dict, optional
             Extra keywords forwarded to :func:`bdrc.fit_predict`.
         with_log_likelihood : bool, default False
@@ -405,12 +421,17 @@ class BdrcEntry(ModelEntry):
         # the config claimed the package-wide setting - and the export manifest copies
         # the config, so a disagreement here would be recorded as provenance.
         sampler = settings.NUTS_SAMPLER if nuts_sampler is None else nuts_sampler
+        # Same reason: resolved here so the recorded config is the rate that was
+        # actually sampled at, short record or not.
+        accept = (bdrc.target_accept_for(len(frame)) if target_accept is None
+                  else float(target_accept))
 
         result = FitResult(
             key=self.key, label=self.label, family="bdrc", n=len(frame),
             status="skipped", reason="",
             config={"variant": self.variant, "zero_flow_ft": zero_flow_ft,
-                    "method": method, "nuts_sampler": sampler})
+                    "method": method, "nuts_sampler": sampler,
+                    "target_accept": accept})
         if not np.isfinite(stage).any() or not np.isfinite(discharge).any():
             result.reason = "no finite measurements"
             return result
@@ -420,6 +441,7 @@ class BdrcEntry(ModelEntry):
         if cores is not None:
             extra["cores"] = cores
         extra.setdefault("nuts_sampler", sampler)
+        extra.setdefault("target_accept", accept)
         try:
             output = bdrc.fit_predict(
                 stage, discharge, grid, model=self.variant, method=method,
@@ -450,16 +472,20 @@ class BdrcEntry(ModelEntry):
             result.reason = "bdrc returned an empty curve"
             return result
 
-        curve = curve.rename(columns={"q_median_cfs": "discharge_median_cfs",
-                                      "q_lower_cfs": "lower", "q_upper_cfs": "upper"})
-        # bdrc reports the posterior-predictive median; there is no separate mean
-        # curve, so the median is what the package's "discharge_cfs" column holds.
-        curve["discharge_cfs"] = curve["discharge_median_cfs"]
+        curve = curve.rename(
+            columns={"q_median_cfs": "discharge_predictive_median_cfs",
+                     "q_lower_cfs": "lower", "q_upper_cfs": "upper",
+                     "q_mean_cfs": "discharge_cfs",
+                     "q_posterior_median_cfs": "discharge_posterior_median_cfs",
+                     "q_posterior_lower_cfs": "posterior_lower",
+                     "q_posterior_upper_cfs": "posterior_upper"})
         predicted = np.interp(stage, curve["stage_ft"], curve["discharge_cfs"],
                               left=np.nan, right=np.nan)
         result.status = "ok"
-        result.curve = curve[["stage_ft", "discharge_cfs", "discharge_median_cfs",
-                              "lower", "upper"]]
+        result.curve = curve[["stage_ft", "discharge_cfs",
+                              "discharge_posterior_median_cfs",
+                              "posterior_lower", "posterior_upper",
+                              "discharge_predictive_median_cfs", "lower", "upper"]]
         result.predicted = predicted
         result.metrics = fit_metrics(discharge, predicted)
         return result
@@ -508,12 +534,13 @@ class BdrcEntry(ModelEntry):
             log.debug("%s fold %d failed: %s", self.key, split, exc)
             return None
         curve = curve.sort_values("stage_ft")
+        # the rating, not the posterior predictive (see posterior_clarification.md)
         predicted = np.interp(test["stage_ft"].to_numpy(float), curve["stage_ft"],
-                              curve["q_median_cfs"], left=np.nan, right=np.nan)
+                              curve["q_mean_cfs"], left=np.nan, right=np.nan)
         return FoldCurve(
             model_key=self.key, split=split,
             stage_ft=curve["stage_ft"].tolist(),
-            discharge_median_cfs=curve["q_median_cfs"].tolist(),
+            discharge_median_cfs=curve["q_posterior_median_cfs"].tolist(),
             lower_cfs=curve["q_lower_cfs"].tolist(),
             upper_cfs=curve["q_upper_cfs"].tolist(),
             train_stage=train_frame["stage_ft"].tolist(),
@@ -831,15 +858,13 @@ MODELS = [
               "#4daf4a"),
     BdrcEntry("plm0", "bdrc power law (plm0)", "bdrc plm0", "#17a89a"),
     BdrcEntry("plm", "bdrc power law, var(h) (plm)", "bdrc plm", "#66c2a5"),
-    # The three spreadsheet forms. Their labels say "refit" on purpose: each is this
-    # package fitting that form to the measurements, NOT the workbook's own typed
-    # coefficients. Confusing the two is the single easiest way to misread the
-    # comparison, so the label carries the distinction.
-    PolynomialEntry("linear", "refit - least-squares linear", "linear",
+    # The three spreadsheet forms, fitted here to the measurements rather than read
+    # from the workbook's typed coefficients.
+    PolynomialEntry("linear", "least-squares linear", "linear",
                     "#e6a817", 1, min_points=3),
-    PolynomialEntry("quadratic", "refit - least-squares quadratic", "quadratic",
+    PolynomialEntry("quadratic", "least-squares quadratic", "quadratic",
                     "#d95f02", 2),
-    ExponentialEntry("exponential", "refit - log-linear exponential", "exponential",
+    ExponentialEntry("exponential", "log-linear exponential", "exponential",
                      "#a6611a", min_points=3),
 ]
 

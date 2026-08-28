@@ -8,8 +8,9 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 #: package lives under ``src/``.
 PROJECT_DIR = PACKAGE_DIR.parents[1]
 
-#: The repository this package sits inside, which is where the shared ``data/`` and
-#: ``cache/`` directories live - they are used by the wider project, not just here.
+#: The repository this package sits inside. Only meaningful for a source checkout -
+#: for an installed copy it points into site-packages - so nothing that has to work
+#: on another machine should be placed relative to it. See ``CACHE_DIR``.
 REPO_DIR = PACKAGE_DIR.parents[2]
 
 # --- reproducibility ---------------------------------------------------------
@@ -34,6 +35,48 @@ ADVI_DRAWS = 8_000
 NUTS_DRAWS = 1_000
 NUTS_TUNE = 1_000
 NUTS_CHAINS = 4
+
+#: NUTS target acceptance rate on a sample of ordinary size. The sampler adapts its
+#: step size until it accepts this fraction of proposals; this is ratingcurve's own
+#: default and PyMC's recommended value for a well-behaved posterior.
+NUTS_TARGET_ACCEPT = 0.95
+
+#: A sample of this many measurements or fewer is a *short record*, and is sampled
+#: with :data:`SMALL_SAMPLE_TARGET_ACCEPT` instead.
+SMALL_SAMPLE_N = 5
+
+#: Target acceptance rate for a short record. With only a handful of measurements the
+#: likelihood barely constrains the breakpoint, so the posterior has a long, thin
+#: ridge that NUTS diverges on at a normal step size - the failure ratingcurve's
+#: troubleshooting page describes
+#: (https://thodson-usgs.github.io/ratingcurve/meta/troubleshooting.html). A target
+#: acceptance rate this high forces a small enough step to follow the ridge. It costs
+#: wall clock, which is affordable precisely because the sample is tiny.
+SMALL_SAMPLE_TARGET_ACCEPT = 0.999
+
+
+def target_accept_for(n: int, default: float = NUTS_TARGET_ACCEPT) -> float:
+    """The NUTS target acceptance rate to sample `n` measurements with.
+
+    Callers do not have to tune the sampler for a short record: every ``fit``
+    in the package resolves its own ``target_accept`` through this function when
+    the caller did not name one.
+
+    Parameters
+    ----------
+    n : int
+        Measurements being fitted.
+    default : float
+        Rate to use when `n` is not a short record.
+
+    Returns
+    -------
+    float
+        :data:`SMALL_SAMPLE_TARGET_ACCEPT` when ``n <= SMALL_SAMPLE_N``, else
+        `default`.
+    """
+    return SMALL_SAMPLE_TARGET_ACCEPT if int(n) <= SMALL_SAMPLE_N else default
+
 
 #: Which NUTS implementation walks the posterior. All of these are drop-in: they
 #: sample the same model and return the same InferenceData, so the fit is the
@@ -128,8 +171,13 @@ CMS_TO_CFS = 1.0 / CFS_TO_CMS
 
 # --- filesystem --------------------------------------------------------------
 
-DATA_DIR = Path(os.environ.get("LRC_DATA_DIR", REPO_DIR / "data"))
-CACHE_DIR = Path(os.environ.get("LRC_CACHE_DIR", REPO_DIR / "cache"))
+#: Data that ships with this repository, as against the fetch caches.
+DATA_DIR = Path(os.environ.get("LRC_DATA_DIR", PROJECT_DIR / "data"))
+
+#: Where fetched USGS, NOAA and pagaia data is cached between runs. Relative to the
+#: working directory, so it never depends on where the package is installed, and
+#: resolved once at import so the path is stable for the session and prints in full.
+CACHE_DIR = Path(os.environ.get("LRC_CACHE_DIR", "lrc_cache")).resolve()
 OUTPUT_DIR = Path(os.environ.get("LRC_OUTPUT_DIR", PROJECT_DIR / "output"))
 
 FIGURE_DIR = OUTPUT_DIR / "figures"

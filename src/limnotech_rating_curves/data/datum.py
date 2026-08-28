@@ -513,6 +513,37 @@ def distance_to_stage(distance, reference_elevation, *, distance_units: str = "f
     return np.asarray(reference_elevation, float) - converted
 
 
+def in_units(values_and_units, units: str) -> pd.Series:
+    """A length and the units it is in, converted to `units`.
+
+    Takes the units alongside the values rather than as a separate argument, so a
+    reading cannot be converted without saying what it is already in. This is the
+    last of the three steps that turn a pagaia reading into feet - fetch with
+    :func:`~limnotech_rating_curves.data.pagaia.raw_station_series`, correct with
+    :func:`~limnotech_rating_curves.data.pagaia_corrections.to_meters`, convert here.
+
+    Parameters
+    ----------
+    values_and_units : tuple
+        ``(values, units)``: a :class:`pandas.Series` of lengths, and the name of
+        the unit they are in.
+    units : {'ft', 'm', 'cm', 'mm'}
+        Units to convert to.
+
+    Returns
+    -------
+    pandas.Series
+        The values in `units`.
+
+    Examples
+    --------
+    >>> float(in_units((pd.Series([3.05]), "m"), "ft").iloc[0])
+    10.006561679790027
+    """
+    values, from_units = values_and_units
+    return values.astype(float) * _length_factor(from_units, units)
+
+
 _LENGTH_IN_MM = {"ft": settings.MM_PER_FOOT, "feet": settings.MM_PER_FOOT,
                  "foot": settings.MM_PER_FOOT,
                  "m": settings.MM_PER_METER, "meter": settings.MM_PER_METER,

@@ -13,6 +13,12 @@ RATINGCURVE_OBSERVED_VAR = "model_q"
 #: Pareto-k above this means PSIS-LOO is unreliable at that observation.
 PARETO_K_GOOD = settings.PARETO_K_GOOD
 
+#: Share of a group's observations whose Pareto-k may exceed ``PARETO_K_GOOD`` before
+#: :func:`elpd_by_group` marks that group's estimate unusable. The same threshold
+#: ``evaluate.logo`` applies to blocks, and for the same reason: a few bad points out
+#: of many is tolerable, a quarter of them is not a number to quote.
+MAX_PCT_K_HIGH = 5.0
+
 #: The Bayesian comparison fields, in table order.
 BAYES_FIELDS = ("elpd_loo", "se_loo", "p_loo", "elpd_waic", "p_waic",
                 "pareto_k_max", "pct_k_high", "n_obs")
@@ -220,6 +226,173 @@ def elpd_from_log_likelihood(log_likelihood) -> dict:
     return _summarize(loo, waic)
 
 
+def elpd_by_group(idata, groups, log_offset: float = 0.0,
+                  observed_var: str = None) -> dict:
+    """PSIS-LOO and WAIC for each group of observations within one joint fit.
+
+    A hierarchical fit has one posterior over every site at once, and one pointwise
+    log-likelihood spanning every measurement. This splits that single score into a
+    per-group contribution, which is what puts an ELPD next to each site on the map.
+
+    The split is exact rather than an approximation, and the reason is worth stating:
+    PSIS fits its generalized Pareto to each observation's importance ratios
+    *independently*, so ``loo_i`` and ``pareto_k`` for one measurement do not depend on
+    which other measurements are in the call. Scoring once and slicing therefore gives
+    the same numbers as scoring each group alone would - and unlike per-group calls, it
+    cannot silently re-weight anything. Do not replace this with a loop over
+    :func:`elpd_from_log_likelihood`.
+
+    What the resulting number *means* needs care. It is group `g`'s contribution to the
+    joint predictive score: how well the model predicts one more observation in `g`
+    having seen the rest of `g` **and every other group**. It is not the score a model
+    fitted to `g` alone would earn.
+
+    Parameters
+    ----------
+    idata : arviz.InferenceData
+        Must carry a ``log_likelihood`` group (see :func:`ensure_log_likelihood`) and a
+        ``posterior``, so ArviZ can work out the relative efficiency itself.
+    groups : array-like
+        One label per observation, in the order the log-likelihood is indexed by.
+        Getting this order wrong misattributes every Pareto-k while leaving each index
+        in range, which is why the caller is expected to have built it from the same
+        frame the model was given.
+    log_offset : float, default 0.0
+        Added to every pointwise log-likelihood, to move it into a common observation
+        space (see :func:`elpd_from_idata`). It shifts each group's ELPD by
+        ``n_group * log_offset`` and leaves ``p_loo`` and ``se_loo`` alone.
+    observed_var : str, optional
+        Which variable in the log-likelihood group to score. Defaults to the only one
+        present, and raises if there is more than one.
+
+    Returns
+    -------
+    dict
+        ``{group_label: scores}``, each holding the fields in ``BAYES_FIELDS`` plus
+        per-observation ``pareto_k`` and ``elpd_loo_i``, and ``elpd_per_obs``,
+        ``reliable`` and ``note``. On failure every group gets the same
+        :func:`unavailable` dict, so a caller can still index by group.
+    """
+    import arviz as az
+    from scipy.special import logsumexp
+
+    groups = np.asarray(groups).ravel()
+    try:
+        available = list(idata.log_likelihood.data_vars)
+    except AttributeError:
+        return {label: unavailable("no log-likelihood group")
+                for label in dict.fromkeys(groups)}
+    if observed_var is None:
+        if len(available) != 1:
+            return {label: unavailable(
+                        f"log-likelihood has {len(available)} variables; name one")
+                    for label in dict.fromkeys(groups)}
+        observed_var = available[0]
+
+    values = np.asarray(idata.log_likelihood[observed_var].values, float)
+    matrix = values.reshape(-1, values.shape[-1])          # (draws, observations)
+    if matrix.shape[-1] != groups.size:
+        return {label: unavailable(
+                    f"{groups.size} group labels for {matrix.shape[-1]} observations")
+                for label in dict.fromkeys(groups)}
+
+    try:
+        loo = az.loo(idata, pointwise=True, var_name=observed_var)
+        waic = az.waic(idata, pointwise=True, var_name=observed_var)
+    except Exception as exc:  # noqa: BLE001
+        return {label: unavailable(f"{type(exc).__name__}: {str(exc)[:120]}")
+                for label in dict.fromkeys(groups)}
+
+    loo_i = np.asarray(loo.loo_i.values, float).ravel()
+    waic_i = np.asarray(waic.waic_i.values, float).ravel()
+    pareto_k = np.asarray(loo.pareto_k.values, float).ravel()
+    # the log pointwise predictive density, which both effective parameter counts are
+    # the gap between: p_loo = lppd - elpd_loo, p_waic = lppd - elpd_waic
+    lppd_i = logsumexp(matrix, axis=0) - np.log(matrix.shape[0])
+
+    scores = {}
+    for label in dict.fromkeys(groups):            # first-seen order, not sorted
+        columns = np.flatnonzero(groups == label)
+        n = int(columns.size)
+        elpd_loo = float(loo_i[columns].sum())
+        elpd_waic = float(waic_i[columns].sum())
+        lppd = float(lppd_i[columns].sum())
+        k = pareto_k[columns]
+        pct_high = float(100 * np.mean(k > PARETO_K_GOOD)) if n else np.nan
+        # the standard error of a sum of n pointwise terms, as ArviZ computes it
+        se_loo = float(np.sqrt(n) * np.std(loo_i[columns])) if n > 1 else np.nan
+        scores[label] = {
+            "elpd_loo": elpd_loo + n * log_offset,
+            "se_loo": se_loo,
+            "p_loo": lppd - elpd_loo,
+            "elpd_waic": elpd_waic + n * log_offset,
+            "p_waic": lppd - elpd_waic,
+            "pareto_k_max": float(np.nanmax(k)) if n else np.nan,
+            "pct_k_high": pct_high,
+            "n_obs": n,
+            "pareto_k": k.tolist(),
+            # the per-measurement terms this group's elpd_loo is the sum of. Kept so a
+            # reloo repair can subtract exactly the point it replaces rather than an
+            # average standing in for it - see evaluate.exact_loo.refine_hierarchical.
+            "elpd_loo_i": (loo_i[columns] + log_offset).tolist(),
+            "elpd_per_obs": (elpd_loo + n * log_offset) / n if n else np.nan,
+            "reliable": bool(n and np.isfinite(pct_high)
+                             and pct_high <= MAX_PCT_K_HIGH),
+            "note": "",
+        }
+        if not scores[label]["reliable"] and np.isfinite(pct_high):
+            scores[label]["note"] = (
+                f"PSIS unreliable: {pct_high:.0f}% of measurements above "
+                f"k={PARETO_K_GOOD}")
+    return scores
+
+
+def pointwise_log_likelihood(fit):
+    """The ``(draws, observations)`` log-likelihood behind a fit, in log-discharge space.
+
+    The two Bayesian families reach it by different routes - bdrc carries the matrix
+    on the fit, ratingcurve computes it from the live posterior and keeps it in a
+    standardized space - so anything that needs the raw matrix (grouped ELPD, for
+    one) goes through here rather than special-casing the backend again.
+
+    Parameters
+    ----------
+    fit : FitResult
+        A completed fit.
+
+    Returns
+    -------
+    tuple of (numpy.ndarray, float) or None
+        The matrix and the constant to add to every entry to put it in raw
+        log-discharge space, or None when the fit carries no usable posterior
+        (a least-squares family, an ADVI fit, or a fit that crossed a process
+        boundary and left its PyMC model behind).
+    """
+    if not fit.ok:
+        return None
+    if (fit.config or {}).get("method") == "advi":
+        return None
+    if fit.log_likelihood is not None:
+        # bdrc: already in raw log-discharge space
+        return np.asarray(fit.log_likelihood, float), 0.0
+    rating = getattr(fit, "rating", None)
+    if rating is None or getattr(rating, "idata", None) is None:
+        return None
+    try:
+        ensure_log_likelihood(rating)
+        log_offset = -float(np.log(rating.model.q_transform.std_))
+        values = rating.idata.log_likelihood[RATINGCURVE_OBSERVED_VAR].values
+    except Exception as exc:  # noqa: BLE001
+        # the message, not just the type: a bare "(ValueError)" in a log is the
+        # difference between a diagnosable failure and a mystery
+        log.info("no pointwise log-likelihood for %s (%s: %s)",
+                 fit.key, type(exc).__name__, exc)
+        return None
+    # (chains, draws, observations) -> (draws, observations)
+    matrix = np.asarray(values, float).reshape(-1, values.shape[-1])
+    return matrix, log_offset
+
+
 def pareto_k_per_point(fit) -> np.ndarray:
     """The per-measurement Pareto-k values from a scored fit.
 
@@ -284,6 +457,17 @@ def comparison_rows(site) -> list:
     list of dict
         Ready for ``pandas.DataFrame``. Successful fits first, then the external
         curves.
+
+    Notes
+    -----
+    ``nse``, ``rmse`` and ``r2_log`` score the posterior mean of the rating,
+    ``E[exp(mu)]``, not the mean of the posterior predictive - the latter carries a
+    factor of ``exp(sigma ** 2 / 2)`` with no finite value where sigma is large.
+    ``elpd_loo`` and ``elpd_waic`` are pointwise *predictive densities* by
+    definition: they ask how probable an unseen measurement is, which cannot be
+    answered without the gaging scatter, and they are computed from the model's
+    log-likelihood rather than from any exponentiated summary, so the same pathology
+    does not reach them. See ``posterior_clarification.md``.
     """
     from ..models import catalog
 
@@ -294,10 +478,13 @@ def comparison_rows(site) -> list:
         row = {"model": fit.key, "model_label": fit.label, "family": fit.family,
                "role": catalog.role(fit.key), "n": fit.n, "status": fit.status}
         row.update({name: fit.metrics.get(name)
-                    for name in ("nse", "rmse", "pbias_pct", "r2_log")})
+                    for name in ("nse", "rmse", "r2_log")})
         bayes = fit.bayes or {}
         row.update({field: bayes.get(field, np.nan) for field in BAYES_FIELDS})
         row["note"] = bayes.get("note", "")
+        # absent means the scorer made no reliability claim, which is not the same as
+        # claiming the estimate is unusable
+        row["reliable"] = bool(bayes.get("reliable", True))
         rows.append(row)
 
     for external in site.external_curves():
@@ -305,9 +492,10 @@ def comparison_rows(site) -> list:
                "family": external.kind, "role": "external",
                "n": external.metrics.get("n"), "status": external.kind}
         row.update({name: external.metrics.get(name)
-                    for name in ("nse", "rmse", "pbias_pct", "r2_log")})
+                    for name in ("nse", "rmse", "r2_log")})
         row.update({field: np.nan for field in BAYES_FIELDS})
         row["note"] = ""
+        row["reliable"] = True     # no ELPD to be unreliable about
         row.update({key: value for key, value in external.detail.items()
                     if key in ("form", "axis", "equation")})
         rows.append(row)
@@ -319,25 +507,28 @@ def comparison_rows(site) -> list:
 #: score table's column headers, so a reader can find out what a column is without
 #: leaving the map.
 METRIC_GLOSSARY = {
-    "curve": "which rating this row scores - a fitted model, a least-squares "
-             "spreadsheet form refitted here, or an external curve somebody else drew",
+    "curve": "which rating this row scores: a fitted model, a least-squares "
+             "spreadsheet form refitted here, or a curve drawn by somebody else",
     "n": "measurements the model was fitted on",
-    "nse": "Nash-Sutcliffe efficiency on discharge; 1 is perfect, 0 is no better "
-           "than the mean observed discharge",
-    "rmse": "root-mean-square error in cfs; in data units, so dominated by high flow",
-    "pbias_pct": "percent bias; positive means the rating over-predicts on balance",
-    "r2_log": "R-squared on log discharge - the one to read for a rating, because "
-              "it weighs proportional error equally at all flows",
+    "nse": "Nash-Sutcliffe efficiency on discharge, scored against the posterior "
+           "mean of the rating. 1 is perfect, 0 is no better than the mean observed "
+           "discharge",
+    "rmse": "root-mean-square error in cfs, against the posterior mean of the "
+            "rating. It is in data units, so high flows dominate it",
+    "r2_log": "R-squared on log discharge, against the posterior mean of the rating. "
+              "Read this one for a rating, since it weighs proportional error equally "
+              "at all flows",
     "elpd_loo": "expected log predictive density for an unseen measurement, by "
-                "PSIS-LOO. Higher is better; only differences on the same sample "
-                "are meaningful",
-    "se_loo": "standard error of elpd_loo; a gap under ~2 of these is not resolvable",
-    "p_loo": "effective number of parameters implied by LOO; far above the model's "
+                "PSIS-LOO. Higher is better, and only differences within one sample "
+                "mean anything",
+    "se_loo": "standard error of elpd_loo. A gap under about 2 of these is not "
+              "resolvable",
+    "p_loo": "effective number of parameters implied by LOO. Far above the model's "
              "real parameter count signals misfit or an over-influential point",
     "elpd_waic": "the same predictive score by WAIC, as a cross-check on elpd_loo",
     "p_waic": "effective parameter count implied by WAIC",
-    "pareto_k_max": f"worst per-measurement Pareto-k; above {PARETO_K_GOOD} the "
-                    f"LOO estimate is unreliable because one measurement dominates",
+    "pareto_k_max": f"worst per-measurement Pareto-k. Above {PARETO_K_GOOD} the LOO "
+                    f"estimate is unreliable, because one measurement dominates it",
     "pct_k_high": "percent of measurements whose Pareto-k is above the threshold",
     "n_obs": "measurements the ELPD was computed over",
 }
@@ -347,31 +538,35 @@ METRIC_GLOSSARY = {
 #: curves actually needs, and the difference between a table that informs and one that
 #: merely reports.
 METRIC_INTUITION = {
-    "curve": "Solid lines are Bayesian ratings; dashed and dotted are least-squares "
-             "forms; black is a curve this package did not fit.",
-    "n": "Fewer than about eight measurements cannot identify a segmented power law "
-         "or a spline, however good the sampler is.",
-    "nse": "Reads like R² on discharge, so it is dominated by the highest flows. A "
-           "curve can score 0.99 here and be a factor of two wrong at low flow.",
-    "rmse": "Compare within a site, never across sites - it is in cfs, so a big river "
+    "curve": "Solid lines are Bayesian ratings, dashed and dotted are least-squares "
+             "forms, and black is a curve this package did not fit.",
+    "n": "Under about eight measurements, a segmented power law or a spline cannot be "
+         "identified however good the sampler is.",
+    "nse": "Reads like R² on discharge, so the highest flows dominate it. A curve can "
+           "score 0.99 here and still be a factor of two wrong at low flow.",
+    "rmse": "Compare it within a site, not across sites. It is in cfs, so a big river "
             "always looks worse than a small one.",
-    "pbias_pct": "Near zero does not mean accurate: equal over- and under-prediction "
-                 "cancels. Read it beside RMSE, not instead of it.",
-    "r2_log": "The one to rank ratings on when you have no ELPD. Proportional error "
-              "counts the same at 5 cfs and 500 cfs, which is how rating error is "
-              "normally judged.",
-    "elpd_loo": "This is the generalization column. In-sample NSE always favours the "
-                "most flexible curve; ELPD estimates how it would do on a "
-                "measurement it never saw, so it penalizes flexibility that bought "
-                "nothing.",
-    "se_loo": "Turn the ranking into a decision with this: two models less than about "
-              "two standard errors apart are tied, and the simpler one wins a tie.",
+    "r2_log": "Rank ratings on this when there is no ELPD. Proportional error counts "
+              "the same at 5 cfs and 500 cfs, which is how rating error is normally "
+              "judged.",
+    "elpd_loo": "The generalization column. In-sample NSE always favours the most "
+                "flexible curve. ELPD estimates how the curve would do on a "
+                "measurement it never saw, so flexibility that bought nothing costs "
+                "it. It is a density over a measurement, so it necessarily includes "
+                "the gaging scatter - unlike NSE and R²log, which score the "
+                "rating itself.",
+    "se_loo": "This turns the ranking into a decision. Two models less than about two "
+              "standard errors apart are tied, and a tie goes to the simpler one.",
     "p_loo": "Compare it with the model's real parameter count. Much larger means the "
              "fit is leaning on one or two measurements.",
-    "elpd_waic": "A second estimate of the same thing. If it disagrees materially "
-                 "with elpd_loo, distrust both.",
+    "elpd_waic": "A second estimate of the same thing. Distrust both if it disagrees "
+                 "materially with elpd_loo.",
     "pareto_k_max": "A reliability flag on elpd_loo, not a score. High almost always "
-                    "means the highest-flow measurement is carrying the curve alone.",
+                    "means the highest-flow measurement is carrying the curve on its "
+                    "own - or, in a hierarchical fit, that the site has so few "
+                    "measurements that dropping one leaves the population holding it "
+                    "up. A ⚠ on elpd_loo means the fit's own diagnostics say not "
+                    "to quote it.",
     "pct_k_high": "How widespread the problem is. One bad point is survivable; a "
                   "quarter of them means the LOO estimate should not be quoted.",
     "n_obs": "Should equal n. If it does not, some measurements were dropped from the "

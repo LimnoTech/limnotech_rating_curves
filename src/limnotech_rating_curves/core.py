@@ -482,7 +482,7 @@ class Sample:
             The station to fetch the record from.
         variable : str, default 'stage'
             Which variable to fetch. See
-            :func:`limnotech_rating_curves.data.pagaia.station_series`.
+            :func:`limnotech_rating_curves.data.pagaia.raw_station_series`.
         pad_fraction : float, optional
             How far past the measurements to fetch. See :meth:`time_range`.
         discharge : pandas.DataFrame, optional
@@ -497,11 +497,16 @@ class Sample:
         numpy.ndarray of matplotlib.axes.Axes
             The two axes, record above and discharge below.
         """
-        from .data import pagaia
+        from .data import datum, pagaia, pagaia_corrections
         from .view import plots
         start, end = self.time_range(pad_fraction)
-        series = pagaia.station_series(station, variable=variable, start=start,
-                                       end=end, units="ft")
+        # Fetch, correct the units, convert - see
+        # limnotech_rating_curves.data.pagaia_corrections.
+        raw = pagaia.raw_station_series(station, variable=variable, start=start,
+                                        end=end)
+        meters = pagaia_corrections.to_meters(raw, pagaia.station_name(station),
+                                              variable=variable)
+        series = datum.in_units(meters, "ft")
         return plots.plot_record(self, series, discharge=discharge, figsize=figsize)
 
 
@@ -524,9 +529,6 @@ class Metrics:
     rmse : float
         Root-mean-square error in cfs. In the units of the data, so it is
         dominated by the high-flow end.
-    pbias_pct : float
-        Percent bias, ``100 * sum(predicted - observed) / sum(observed)``.
-        Positive means the rating over-predicts on balance.
     r2_log : float
         R-squared computed on log discharge. This is the one to read for a
         rating: it weighs a factor-of-two error at low flow the same as at high
@@ -555,7 +557,6 @@ class Metrics:
     n: int
     nse: float
     rmse: float
-    pbias_pct: float
     r2_log: float
     elpd_loo: float = float("nan")
     se_loo: float = float("nan")
@@ -584,7 +585,6 @@ class Metrics:
         return cls(
             n=int(in_sample.get("n", 0)),
             nse=in_sample.get("nse", nan), rmse=in_sample.get("rmse", nan),
-            pbias_pct=in_sample.get("pbias_pct", nan),
             r2_log=in_sample.get("r2_log", nan),
             elpd_loo=bayes.get("elpd_loo", nan), se_loo=bayes.get("se_loo", nan),
             p_loo=bayes.get("p_loo", nan), elpd_waic=bayes.get("elpd_waic", nan),
@@ -593,7 +593,7 @@ class Metrics:
     def to_dict(self) -> dict:
         """The scores as a plain dict, in table order."""
         return {"n": self.n, "nse": self.nse, "rmse": self.rmse,
-                "pbias_pct": self.pbias_pct, "r2_log": self.r2_log,
+                "r2_log": self.r2_log,
                 "elpd_loo": self.elpd_loo, "se_loo": self.se_loo,
                 "p_loo": self.p_loo, "elpd_waic": self.elpd_waic,
                 "pareto_k_max": self.pareto_k_max}
@@ -615,7 +615,7 @@ def fit_metrics(observed, predicted) -> dict:
     Returns
     -------
     dict
-        ``rmse``, ``nse``, ``pbias_pct``, ``r2_log``, ``n`` - see
+        ``rmse``, ``nse``, ``r2_log``, ``n`` - see
         :class:`Metrics` for what each means. NSE is NaN when the observations
         have no variance (nothing to explain), and ``r2_log`` is NaN when fewer
         than two pairs are positive.
@@ -625,15 +625,12 @@ def fit_metrics(observed, predicted) -> dict:
     usable = np.isfinite(observed) & np.isfinite(predicted)
     observed, predicted = observed[usable], predicted[usable]
     if observed.size == 0:
-        return {"rmse": np.nan, "nse": np.nan, "pbias_pct": np.nan,
-                "r2_log": np.nan, "n": 0}
+        return {"rmse": np.nan, "nse": np.nan, "r2_log": np.nan, "n": 0}
 
     residual = predicted - observed
     rmse = float(np.sqrt(np.mean(residual ** 2)))
     variance = float(np.sum((observed - observed.mean()) ** 2))
     nse = float(1 - np.sum(residual ** 2) / variance) if variance > 0 else np.nan
-    total = float(observed.sum())
-    pbias = float(100 * residual.sum() / total) if total != 0 else np.nan
 
     positive = (observed > 0) & (predicted > 0)
     if positive.sum() >= 2:
@@ -645,7 +642,7 @@ def fit_metrics(observed, predicted) -> dict:
     else:
         r2_log = np.nan
 
-    return {"rmse": rmse, "nse": nse, "pbias_pct": pbias, "r2_log": r2_log,
+    return {"rmse": rmse, "nse": nse, "r2_log": r2_log,
             "n": int(observed.size)}
 
 

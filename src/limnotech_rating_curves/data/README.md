@@ -13,6 +13,21 @@ data.colocated_sample("SBR-09")         # USGS discharge vs MAGL stage
 data.station_sample(station, discharge) # any pagaia station + your discharge
 ```
 
+## `noaa.py` — NOAA / NWS published ratings
+
+The NWS keeps its own rating at each forecast point, separate from the USGS one for
+the same gage. The NWPS API cannot be searched by USGS site number, so the reverse
+lookup goes through NOAA's HADS crosswalk.
+
+| Name | Purpose |
+| --- | --- |
+| `lid_for_usgs_site(site)` | The NWS location id for a USGS site, via the HADS crosswalk |
+| `published_rating(lid)` | The NWS rating as a tidy `stage_ft` / `discharge_cfs` curve |
+| `published_reference(lid, sample)` | That rating packaged as a comparison curve |
+| `gauge_info(lid)` | Gauge metadata, including the USGS site it corresponds to |
+| `discharge_at(curve, stage)` | Read the table; NaN outside it, never extrapolated |
+| `datum_agreement(lid)` | Whether NWS and USGS are on the same stage axis - reported, never silently corrected |
+
 ## `usgs.py` — public USGS data
 
 | Name | Purpose |
@@ -35,9 +50,36 @@ data.station_sample(station, discharge) # any pagaia station + your discharge
 | Name | Purpose |
 | --- | --- |
 | `station_sample(station, discharge)` | Sensor stage matched to your discharge measurements |
-| `station_series(station, variable="stage")` | One variable's timeseries |
+| `raw_station_series(station, variable="stage")` | One variable's timeseries, unconverted, with the units the database claims |
+| `station_name(station)` | The station's name, whichever attribute it carries it in |
 | `station_coordinates(stations)` | Coordinates, for the map |
 | `installed()`, `require()` | Is the optional `fb_pagaia` client available |
+
+Turning a pagaia reading into feet is three steps, written out by the caller so that
+the units correction is never silent:
+
+```python
+raw    = pagaia.raw_station_series(station, "distance", start, end)
+meters = pagaia_corrections.to_meters(raw, pagaia.station_name(station))
+feet   = datum.in_units(meters, "ft")
+```
+
+## `pagaia_corrections.py` — units the database gets wrong
+
+pagaia reports every water-level variable as `millimeter`. The values are really
+meters, except on the five Geolux stations, whose readings were millimeters until
+2026-08-19 14:30 UTC. Both corrections are applied here, by the caller, never by
+default inside a fetch.
+
+| Name | Purpose |
+| --- | --- |
+| `to_meters(raw, station)` | Both corrections, returning `(values, "m")` |
+| `geolux_stations()`, `is_geolux(station)` | Which stations report millimeters |
+
+Temporary — delete this module once the database is corrected. `to_meters` raises as
+soon as pagaia stops claiming millimeters, so it cannot keep applying unnoticed. A
+cached reading carries the units claimed when it was fetched, so that check fires only
+after `refresh=True` or `cache.clear("pagaia_series_units")`.
 
 ## `magl.py` — the MAGL monitoring network
 
@@ -56,6 +98,7 @@ Site registry, co-location, control-point survey, and the discharge exports.
 | `spreadsheet_distance_ft`, `pagaia_distance_ft` | Either source alone |
 | `control_point_elevations()`, `sensor_moves()`, `reference_elevation(station, index)` | The survey and its changes over time |
 | `control_point_offsets()`, `control_point_offset(station)` | Gap between surveyed control point and the sensor's own datum |
+| `sensor_elevation(station, index)` | Elevation the distance readings are measured from; subtract a distance to get water-surface elevation |
 | `stage_at_times(station, times)` | Stage at the instants discharge was measured |
 | `rating_curve_sheet(path)`, `flow_sheet_sample(path)` | Measurements out of a flow workbook |
 | `pagaia_session()`, `pagaia_stations(stations)` | The network's pagaia connection |

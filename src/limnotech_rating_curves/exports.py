@@ -152,10 +152,6 @@ class FittedRating:
             return None
         return self.result.curve.sort_values("stage_ft").reset_index(drop=True)
 
-    def equation(self) -> str:
-        rating = self.result.rating
-        return str(rating.equation()) if hasattr(rating, "equation") else ""
-
     def summary(self):
         from .evaluate import diagnostics
         return diagnostics.posterior_summary(self.result)
@@ -212,7 +208,6 @@ def rating_manifest(rating, sample_id=None) -> dict:
             "key": rating.name,
             "label": rating.label,
             "family": rating.family,
-            "equation": _equation(rating),
             "has_posterior": bool(getattr(rating.entry, "has_posterior", True)),
         },
         # Every knob that changes the numbers, so a fit can be reproduced exactly
@@ -228,7 +223,7 @@ def rating_manifest(rating, sample_id=None) -> dict:
         "parameters": _parameter_records(rating),
         "metrics": _plain({
             "n": metrics.n, "nse": metrics.nse, "rmse": metrics.rmse,
-            "pbias_pct": metrics.pbias_pct, "r2_log": metrics.r2_log,
+            "r2_log": metrics.r2_log,
             "elpd_loo": metrics.elpd_loo, "se_loo": metrics.se_loo,
             "p_loo": metrics.p_loo, "elpd_waic": metrics.elpd_waic,
             "pareto_k_max": metrics.pareto_k_max,
@@ -244,13 +239,6 @@ def rating_manifest(rating, sample_id=None) -> dict:
 def _package_version() -> str:
     from . import __version__
     return __version__
-
-
-def _equation(rating) -> str:
-    try:
-        return str(rating.equation())
-    except Exception:  # noqa: BLE001 - not every family exposes a closed form
-        return ""
 
 
 def _parameter_records(rating) -> list:
@@ -270,10 +258,6 @@ def _parameter_records(rating) -> list:
 
 def _convergence_summary(rating) -> dict:
     """Worst R-hat and lowest ESS, so a reader can tell whether to trust the file.
-
-    ``converged`` is None rather than False when R-hat could not be computed - a
-    variational fit has no chains to compare, and "not measured" is not the same
-    claim as "did not converge".
     """
     if not rating.fitted:
         return {"available": False}
@@ -430,6 +414,86 @@ def save_site(site, directory=None, **kwargs) -> list:
     return written
 
 
+def stage_decimals(step: float) -> int:
+    """Decimal places implied by `step`, e.g. 3 for ``0.001``."""
+    text = np.format_float_positional(float(step), trim="-")
+    return len(text.split(".")[1]) if "." in text else 0
+
+
+def stage_grid(stage_min, stage_max, step: float = 0.01, precision=None):
+    """Evenly spaced stages from `stage_min` through `stage_max`, rounded.
+
+    Parameters
+    ----------
+    stage_min, stage_max : float
+        First and last stage, in feet. `stage_max` is included when it lands on the
+        step.
+    step : float, default 0.01
+        Spacing in feet.
+    precision : int, optional
+        Decimal places to round the stages to. Defaults to the places `step` itself
+        has, which is what keeps a 0.001 ft grid printing as ``1.234`` rather than
+        ``1.2340000000000002``.
+
+    Returns
+    -------
+    numpy.ndarray
+    """
+    step = float(step)
+    if not step > 0:
+        raise ValueError(f"step must be positive, got {step}")
+    stage_min, stage_max = float(stage_min), float(stage_max)
+    if stage_max < stage_min:
+        raise ValueError(f"stage_max ({stage_max}) is below stage_min ({stage_min})")
+    if precision is None:
+        precision = stage_decimals(step)
+    # half a step of tolerance, so the endpoint is included when it lands on the
+    # grid and floating-point error does not decide whether it does
+    grid = np.arange(stage_min, stage_max + step / 2, step)
+    return np.round(grid, int(precision))
+
+
+def rating_table(evaluate, stage_min, stage_max, *, step: float = 0.01,
+                 precision=None, path=None) -> pd.DataFrame:
+    """Tabulate a rating on a stage grid, and optionally write it as CSV.
+
+    The shared body of :meth:`RatingModel.table` and :meth:`SavedRating.table`.
+
+    The whole grid goes to `evaluate` in one call. This matters rather than being an
+    implementation detail: ``ratingcurve`` draws from the posterior each time it is
+    asked, so two calls on the same stages differ by a percent or two, and a table
+    stitched together from several calls carries a step change at every seam. One
+    call means one draw of the posterior behind the whole table.
+
+    Parameters
+    ----------
+    evaluate : callable
+        Takes an array of stages and returns a DataFrame of that many rows.
+    stage_min, stage_max : float
+        The range to tabulate, in feet.
+    step : float, default 0.01
+        Spacing in feet.
+    precision : int, optional
+        Decimal places for the stage column. Defaults to `step`'s own places.
+    path : path-like, optional
+        Write the table here as CSV as well as returning it.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per stage, with whatever columns `evaluate` reports.
+    """
+    grid = stage_grid(stage_min, stage_max, step=step, precision=precision)
+    if grid.size == 0:
+        raise ValueError(f"no stages between {stage_min} and {stage_max} at a step "
+                         f"of {step}")
+    table = evaluate(grid).reset_index(drop=True)
+    if path is not None:
+        table.to_csv(path, index=False)
+        log.info("wrote %d rows to %s", len(table), path)
+    return table
+
+
 def curve_table(saved_ratings) -> pd.DataFrame:
     """Every saved rating's fitted curve in one long table, for a spreadsheet.
 
@@ -445,7 +509,7 @@ def curve_table(saved_ratings) -> pd.DataFrame:
     Returns
     -------
     pandas.DataFrame
-        ``site``, ``model``, ``model_label``, ``family``, ``equation``,
+        ``site``, ``model``, ``model_label``, ``family``,
         ``stage_ft``, ``discharge_cfs``, ``lower``, ``upper``, and the fit's ``nse``
         / ``rmse`` / ``r2_log`` repeated on every row so a single sheet is
         self-explanatory.
@@ -463,7 +527,6 @@ def curve_table(saved_ratings) -> pd.DataFrame:
         frame.insert(1, "model", saved.name)
         frame.insert(2, "model_label", saved.label)
         frame.insert(3, "family", saved.family)
-        frame.insert(4, "equation", saved.equation)
         for name in ("nse", "rmse", "r2_log"):
             frame[name] = scores.get(name)
         frames.append(frame)
@@ -508,9 +571,7 @@ class SavedRating:
     """A rating read back from disk: its provenance, its curve, and its draws.
 
     Predicts by interpolating the stored curve, which is what the map and the
-    dashboard do with a live fit too. It is deliberately **not** a
-    :class:`~limnotech_rating_curves.ratings.RatingModel`: it cannot be refitted,
-    and it does not pretend to evaluate the model's parameters exactly.
+    dashboard do with a live fit too. 
 
     Attributes
     ----------
@@ -542,10 +603,6 @@ class SavedRating:
     @property
     def family(self) -> str:
         return self.manifest.get("model", {}).get("family", "")
-
-    @property
-    def equation(self) -> str:
-        return self.manifest.get("model", {}).get("equation", "")
 
     @property
     def sampler(self) -> dict:
@@ -630,6 +687,54 @@ class SavedRating:
         predicted = np.interp(stages, curve["stage_ft"], curve["discharge_cfs"],
                               left=np.nan, right=np.nan)
         return float(predicted[0]) if scalar else predicted
+
+    def table(self, *, stage_min=None, stage_max=None, step: float = 0.01,
+              precision=None, path=None) -> pd.DataFrame:
+        """The stored rating on an evenly spaced stage grid, for a spreadsheet.
+
+        The same call as :meth:`RatingModel.table`, so a lookup table can be
+        produced from a live fit or from a file with one line of code either way.
+        The stored curve is interpolated, and the range defaults to
+        :attr:`stage_range` because a saved rating cannot be extrapolated beyond
+        what was written - stages outside it come back NaN.
+
+        Parameters
+        ----------
+        stage_min, stage_max : float, optional
+            The range to tabulate, in feet. Default to :attr:`stage_range`.
+        step : float, default 0.01
+            Spacing in feet. Use 0.001 for a thousandths table.
+        precision : int, optional
+            Decimal places for the stage column. Defaults to `step`'s own places.
+        path : path-like, optional
+            Write the table here as CSV as well as returning it.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Columns ``stage_ft``, ``discharge_cfs``, ``lower``, ``upper``.
+
+        Examples
+        --------
+        >>> saved.table(step=0.001, path="rating_table.csv")   # doctest: +SKIP
+        """
+        low, high = self.stage_range
+        if stage_min is None:
+            stage_min = low
+        if stage_max is None:
+            stage_max = high
+        if not np.isfinite(stage_min) or not np.isfinite(stage_max):
+            raise RuntimeError(f"{self.path.name} stored no stage range, so a table "
+                               f"needs stage_min= and stage_max= given explicitly")
+
+        def evaluate(stages):
+            lower, upper = self.interval(stages)
+            return pd.DataFrame({"stage_ft": stages,
+                                 "discharge_cfs": self.predict(stages),
+                                 "lower": lower, "upper": upper})
+
+        return rating_table(evaluate, stage_min, stage_max, step=step,
+                            precision=precision, path=path)
 
     def interval(self, stage, level=None):
         """The stored credible interval at `stage`, as ``(lower, upper)``.
@@ -825,7 +930,6 @@ class SavedRating:
             f"   ({self.manifest.get('site', {}).get('source') or 'unknown source'},"
             f" n={self.manifest.get('site', {}).get('n_measurements')})",
             f"  model        {self.name}  -  {self.label}   [{self.family}]",
-            f"  equation     {self.equation or '(no closed form)'}",
             f"  stage range  {number(low)} to {number(high)} "
             f"{self.manifest.get('units', {}).get('stage', 'ft')}"
             f"   ({len(curve)} curve points)",
@@ -835,7 +939,6 @@ class SavedRating:
             f"   seed {sampler.get('seed', '?')}",
             f"  in-sample    NSE {number(scores.get('nse'), '{:.3f}')}"
             f"   RMSE {number(scores.get('rmse'))} cfs"
-            f"   PBIAS {number(scores.get('pbias_pct'), '{:.1f}')}%"
             f"   R²log {number(scores.get('r2_log'), '{:.3f}')}",
             f"  predictive   ELPD_LOO {number(scores.get('elpd_loo'), '{:.1f}')}"
             f" ± {number(scores.get('se_loo'), '{:.1f}')}"
@@ -1014,7 +1117,6 @@ def manifest_index(saved_ratings) -> pd.DataFrame:
             "n": saved.manifest.get("site", {}).get("n_measurements"),
             "method": saved.sampler.get("method"),
             "stage_low_ft": low, "stage_high_ft": high,
-            "equation": saved.equation,
             "nse": scores.get("nse"), "rmse": scores.get("rmse"),
             "r2_log": scores.get("r2_log"), "elpd_loo": scores.get("elpd_loo"),
             "se_loo": scores.get("se_loo"),

@@ -40,18 +40,17 @@ Also exported: `MODEL_KEYS`, `SPREADSHEET_FORM_KEYS`, `DEFAULT_KEYS`, `GROUPS`,
 | Name | Purpose |
 | --- | --- |
 | `fit(sample, ...)` | Fit one model, never raises; returns a `FitResult` |
-| `BayesianRating` | `.fit`, `.predict`, `.table`, `.coefficients`, `.equation`, `.summary`, `.residuals`, `.save`, `.fitted` |
+| `BayesianRating` | `.fit`, `.predict`, `.table`, `.equation`, `.summary`, `.residuals`, `.save`, `.fitted` |
 | `available_algorithms()` | Which estimator families this wrapper can build |
 | `breakpoint_prior(stage, discharge, segments)` | The normal prior on power-law breakpoints |
 | `adapt_config(...)` | Whether `n` measurements can support a model, and how |
-| `format_power_law(coefficients)` | Write a segmented power law as an equation |
 
 ## `bdrc/` — see [`bdrc/README.md`](bdrc/)
 
 ## `polynomial.py` — least squares in stage
 
 `fit_polynomial(stage, discharge, degree=2)` → `PolynomialRating` with
-`.predict`, `.interval` (prediction interval), `.table`, `.equation`,
+`.predict`, `.interval` (prediction interval), `.table`,
 `.display_range`. `fit(sample, key=..., label=...)` wraps it as a `FitResult`.
 
 ## `exponential.py` — Excel's exponential trendline

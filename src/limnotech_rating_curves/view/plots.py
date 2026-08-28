@@ -461,6 +461,21 @@ def plot_log_log(rating, ax=None, *, zero_flow=None, level: float = 0.95):
     return ax
 
 
+def _rating_estimate(model, stage) -> np.ndarray:
+    """The model's discharge at `stage`, as the score tables measure it.
+
+    The posterior mean of the rating where the family exposes its mean function, and
+    ``predict`` otherwise - which for a least-squares fit is the same number. Keeps a
+    residual plot showing the quantity the metrics were computed from rather than the
+    posterior predictive mean, which sits above it by ``exp(sigma ** 2 / 2)``. See
+    ``posterior_clarification.md``.
+    """
+    try:
+        return np.asarray(model.posterior_mean(stage), float)
+    except (AttributeError, NotImplementedError):
+        return np.asarray(model.predict(stage), float)
+
+
 def plot_residual_ratio(rating, ax=None):
     """Predicted over observed discharge at every measurement, against stage.
 
@@ -491,7 +506,7 @@ def plot_residual_ratio(rating, ax=None):
     ax.axhline(1.0, color="0.4", lw=1)
     marker = "o-" if len(models) > 1 else "o"
     for model in models:
-        ax.plot(stage, model.predict(stage) / observed, marker, ms=5, lw=0.8,
+        ax.plot(stage, _rating_estimate(model, stage) / observed, marker, ms=5, lw=0.8,
                 alpha=0.8, color=model.color, label=model.label)
 
     reference = getattr(rating, "reference", None)

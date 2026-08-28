@@ -12,8 +12,7 @@ from limnotech_rating_curves.models import catalog
 
 @pytest.fixture
 def measurements() -> pd.DataFrame:
-    """A synthetic rating: Q = 12 (h - 1.5)^1.9, twelve points, no noise worth
-    speaking of."""
+    """A synthetic rating: Q = 12 (h - 1.5)^1.9, with minimal noise"""
     stage = np.linspace(2.0, 9.0, 12)
     discharge = 12.0 * (stage - 1.5) ** 1.9
     rng = np.random.default_rng(0)
@@ -38,7 +37,6 @@ def test_least_squares_round_trip_predicts_identically(measurements, tmp_path, m
     assert saved.site_id == "TEST-01"
     assert saved.name == model
     assert saved.family in ("polynomial", "exponential")
-    assert saved.equation
 
     low, high = saved.stage_range
     stages = np.linspace(low, high, 25)
@@ -189,7 +187,7 @@ def test_export_directory_writes_the_human_tables(measurements, tmp_path):
     assert len(list(destination.glob(f"*{exports.MANIFEST_SUFFIX}"))) == 1
 
     curves = pd.read_csv(destination / "rating_curves.csv")
-    assert {"site", "model", "stage_ft", "discharge_cfs", "equation"} <= set(curves)
+    assert {"site", "model", "stage_ft", "discharge_cfs"} <= set(curves)
     index = pd.read_csv(destination / "ratings_index.csv")
     assert index["intact"].all()
 
@@ -226,11 +224,20 @@ def test_posterior_round_trip_with_real_draws(measurements, tmp_path):
                                curve["discharge_cfs"].to_numpy(float),
                                rtol=1e-12, atol=0)
 
-    # Against the live model it can only be a sanity bound, and the reason is worth
-    # knowing: ratingcurve's predict() draws from the posterior on every call, so two
-    # calls on the same fitted object do not agree with each other either. On this
-    # tiny ADVI fit that Monte-Carlo scatter is several percent, which is far larger
-    # than any error the file introduces.
+    # Against the live model, compared with the quantity the stored curve actually
+    # holds. ``discharge_cfs`` is the posterior mean of the rating, so the live
+    # counterpart is ``posterior_mean`` - deterministic, and equal to within the error
+    # of interpolating a fine grid, which is what this asserts.
+    #
+    # Not ``predict``: that is the posterior *predictive* mean, larger by
+    # ``exp(sigma ** 2 / 2)`` - 5.7% on this fit - and redrawn on every call, so on
+    # this tiny ADVI fit it lands anywhere from 0.53 to 0.98 of the rating. Comparing
+    # against it needed a 30% tolerance that hid the systematic offset and still
+    # failed on the noise. See ``posterior_clarification.md``.
     midpoints = (grid[:-1] + grid[1:]) / 2.0
-    np.testing.assert_allclose(saved.predict(midpoints), rating.predict(midpoints),
-                               rtol=0.30)
+    np.testing.assert_allclose(saved.predict(midpoints),
+                               rating.posterior_mean(midpoints), rtol=5e-3)
+
+    # and the offset itself is real and one-directional, which is the whole reason the
+    # stored curve is the rating rather than the predictive mean
+    assert np.mean(rating.predict(midpoints) / saved.predict(midpoints)) > 1.0

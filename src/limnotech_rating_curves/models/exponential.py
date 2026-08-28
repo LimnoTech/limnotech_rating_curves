@@ -136,11 +136,6 @@ class ExponentialRating:
                              "lower": np.atleast_1d(lower),
                              "upper": np.atleast_1d(upper)})
 
-    def equation(self, precision: int = 6) -> str:
-        """The fitted curve, in the form a spreadsheet would print it."""
-        return (f"Q = {self.amplitude:.{precision}g} "
-                f"exp({self.rate:.{precision}g} (h - {self.stage_offset:.{precision}g}))")
-
     def __repr__(self):
         low, high = self.effective_range
         return (f"ExponentialRating(rate={self.rate:.4g}, r2={self.r_squared:.4f}, "
@@ -253,7 +248,6 @@ def fit(sample, *, key: str, label: str, min_points: int = 3,
     result.config.update({
         "amplitude": fitted.amplitude, "rate": fitted.rate,
         "stage_offset": fitted.stage_offset,
-        "equation": fitted.equation(),
         # both, deliberately: the log-space number is what Excel shows and it is
         # always the flattering one
         "r_squared": fitted.r_squared, "r_squared_log": fitted.r_squared_log,

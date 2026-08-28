@@ -3,7 +3,7 @@ import pandas as pd
 
 from .compiled import c_upper_bound, compiled_for, finalize_grid
 from .defaults import (ADVI_STEPS, CFS_TO_CMS, FT_TO_M, MODELS, NUM_CHAINS,
-                       NUM_DRAWS, NUM_TUNE, NUTS_SAMPLER, SEED, TARGET_ACCEPT)
+                       NUM_DRAWS, NUM_TUNE, NUTS_SAMPLER, SEED, target_accept_for)
 from .design import components
 from .posterior import assemble
 from .sampling import sample_hyperparameters
@@ -11,7 +11,7 @@ from .sampling import sample_hyperparameters
 
 def fit(discharge, stage, model="gplm0", *, method="nuts", c_param=None,
         h_max=None, forcepoint=None, draws=NUM_DRAWS, tune=NUM_TUNE,
-        chains=NUM_CHAINS, cores=1, seed=SEED, target_accept=TARGET_ACCEPT,
+        chains=NUM_CHAINS, cores=1, seed=SEED, target_accept=None,
         progressbar=False, advi_n=ADVI_STEPS, nuts_sampler=NUTS_SAMPLER):
     """Fit a bdrc rating curve. SI units: `discharge` in m^3/s, `stage` in m.
 
@@ -22,6 +22,9 @@ def fit(discharge, stage, model="gplm0", *, method="nuts", c_param=None,
     forcepoint  boolean mask of measurements the curve should be forced through
     cores       1 keeps the four chains sequential; PyMC's multiprocessing
                 deadlocks under some Windows launchers (see the README)
+    target_accept NUTS target acceptance rate; None resolves it from the number of
+                measurements with `defaults.target_accept_for`, which raises it on
+                a short record so the sampler does not diverge there
     nuts_sampler which NUTS implementation walks the marginal: "pymc", "nutpie",
                 "numpyro" or "blackjax". All four sample the same posterior, so
                 this changes the wall clock and nothing else.
@@ -40,6 +43,9 @@ def fit(discharge, stage, model="gplm0", *, method="nuts", c_param=None,
                          "zero; if you know the stage of zero discharge, use c_param")
     if c_param is not None and stage.min() < c_param:
         raise ValueError("c_param must be lower than the minimum stage in the data")
+
+    if target_accept is None:
+        target_accept = target_accept_for(stage.size)
 
     forcepoint = (np.zeros(stage.size, bool) if forcepoint is None
                   else np.asarray(forcepoint, bool))
@@ -65,6 +71,7 @@ def fit(discharge, stage, model="gplm0", *, method="nuts", c_param=None,
                               "forcepoint": forcepoint, "c_upper": c_upper,
                               "method": method, "advi_n": advi_n,
                               "nuts_sampler": nuts_sampler,
+                              "target_accept": target_accept,
                               "draws": draws, "tune": tune, "chains": chains,
                               "seed": seed})
 
@@ -75,8 +82,10 @@ def fit_predict(stage_ft, discharge_cfs, grid_stage_ft, *, model="gplm0",
     """Fit one sample and predict discharge on `grid_stage_ft`, in ft and cfs.
 
     Returns a DataFrame with columns stage_ft, q_median_cfs, q_lower_cfs,
-    q_upper_cfs (the posterior-predictive median and 2.5 / 97.5% bounds), keeping
-    only finite, positive predictions. With `with_loglik=True` returns a dict of
+    q_upper_cfs (the posterior-predictive median and 2.5 / 97.5% bounds) and
+    q_mean_cfs, q_posterior_median_cfs, q_posterior_lower_cfs,
+    q_posterior_upper_cfs (the same summaries of the rating itself, without gaging
+    scatter), keeping only finite, positive predictions. With `with_loglik=True` returns a dict of
     {"curve", "loglik", "native", "fit"}, where `loglik` is the (draws, obs)
     pointwise log-likelihood in raw log-discharge space and `native` carries this
     model's own WAIC / DIC.
@@ -91,11 +100,16 @@ def fit_predict(stage_ft, discharge_cfs, grid_stage_ft, *, model="gplm0",
     fitted = fit(discharge, stage, model, method=method, c_param=c_param,
                  h_max=grid.max(), advi_n=advi_n, **kwargs)
     predicted = fitted.predict(grid)
+    rating = fitted.predict_posterior(grid)
     curve = pd.DataFrame({
         "stage_ft": predicted["h"] / FT_TO_M,
         "q_median_cfs": predicted["median"] / CFS_TO_CMS,
         "q_lower_cfs": predicted["lower"] / CFS_TO_CMS,
-        "q_upper_cfs": predicted["upper"] / CFS_TO_CMS})
+        "q_upper_cfs": predicted["upper"] / CFS_TO_CMS,
+        "q_mean_cfs": rating["mean"] / CFS_TO_CMS,
+        "q_posterior_median_cfs": rating["median"] / CFS_TO_CMS,
+        "q_posterior_lower_cfs": rating["lower"] / CFS_TO_CMS,
+        "q_posterior_upper_cfs": rating["upper"] / CFS_TO_CMS})
     curve = curve[np.isfinite(curve["q_median_cfs"]) & (curve["q_median_cfs"] > 0)]
     if not with_loglik:
         return curve

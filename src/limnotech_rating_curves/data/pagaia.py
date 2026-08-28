@@ -5,6 +5,7 @@ import pandas as pd
 
 from ..support import cache
 from . import datum as datum_module
+from . import pagaia_corrections
 from .. import settings
 from ..core import Sample
 
@@ -68,12 +69,6 @@ VARIABLE_TERMS = {
 #: used for it.
 DEFAULT_MATCH_TOLERANCE = "3h"
 
-#: Units assumed for a length variable whose metadata does not say. The stations
-#: record lengths in millimeters, so a reading that arrives unlabelled is read that
-#: way rather than guessed at from its magnitude.
-FALLBACK_SOURCE_UNITS = "mm"
-
-
 def station_coordinates(stations) -> dict:
     """Coordinates of pagaia stations, for the map.
 
@@ -97,13 +92,13 @@ def station_coordinates(stations) -> dict:
     coordinates = {}
     for candidate in candidates:
         latlon = getattr(candidate, "latlon", None)
-        name = _station_name(candidate)
+        name = station_name(candidate)
         if latlon and all(value is not None for value in latlon):
             coordinates[name] = (float(latlon[0]), float(latlon[1]))
     return coordinates
 
 
-def _station_name(obj) -> str:
+def station_name(obj) -> str:
     """A station's display name, whichever attribute it carries it in."""
     for attribute in ("samplingfeaturename", "name", "samplingfeaturecode",
                       "station_id"):
@@ -113,10 +108,14 @@ def _station_name(obj) -> str:
     return str(obj)
 
 
-def station_series(pagaia_station, variable: str = "stage", start=None, end=None,
-                   units: str = "ft", source_units: str = None,
-                   refresh: bool = False) -> pd.Series:
-    """One variable's timeseries from a pagaia station.
+def raw_station_series(pagaia_station, variable: str = "stage", start=None, end=None,
+                       refresh: bool = False) -> tuple:
+    """One variable's timeseries from a pagaia station, exactly as stored.
+
+    **No conversion is applied.** This is the first of the three steps that turn a
+    pagaia reading into feet: fetch here, correct the units with
+    :func:`~limnotech_rating_curves.data.pagaia_corrections.to_meters`, then convert
+    with :func:`~limnotech_rating_curves.data.datum.in_units`.
 
     Parameters
     ----------
@@ -129,27 +128,28 @@ def station_series(pagaia_station, variable: str = "stage", start=None, end=None
     start, end : str or datetime, optional
         Window to fetch. Both are required by the API, so leaving them out fetches
         nothing and returns an empty series.
-    units : {'ft', 'm', 'cm', 'mm'}, default 'ft'
-        Units to return. The reading's own units come from the station's variable
-        metadata and are converted to these.
-    source_units : str, optional
-        Override the units the station reports the variable in. Use this only when
-        the metadata is known to be wrong; by default it is believed.
     refresh : bool, default False
         Refetch instead of using the cache.
 
     Returns
     -------
-    pandas.Series
-        Indexed by tz-naive timestamp, ascending, duplicates dropped. Empty when
-        the station does not record that variable, or when the server is
-        unreachable - which is logged rather than raised, so a caller with another
-        source to fall back on can use it.
+    tuple
+        ``(values, claimed_units)``. `values` is indexed by tz-naive timestamp,
+        ascending, duplicates dropped, and empty when the station does not record
+        that variable or the server is unreachable - which is logged rather than
+        raised, so a caller with another source to fall back on can use it.
+
+        `claimed_units` is the unit name the station's metadata reports, or ``None``
+        when it reports nothing. It is what the database *claims*, which is not
+        necessarily what the values are in: for the MAGL stations it is currently
+        wrong, which is what
+        :mod:`limnotech_rating_curves.data.pagaia_corrections` exists to fix.
     """
-    name = _station_name(pagaia_station)
+    name = station_name(pagaia_station)
     if start is None or end is None:
-        log.info("station_series(%s) needs both start and end; returning empty", name)
-        return pd.Series(dtype=float, name=name)
+        log.info("raw_station_series(%s) needs both start and end; returning empty",
+                 name)
+        return pd.Series(dtype=float, name=name), None
 
     def build():
         """Fetch the window, pull out the variable, and record its units."""
@@ -168,17 +168,8 @@ def station_series(pagaia_station, variable: str = "stage", start=None, end=None
             return pd.Series(dtype=float, name=name), None
         return series, _reported_units(metadata, series.name)
 
-    series, reported = cache.cached("pagaia_series_units",
-                                    (name, variable, str(start), str(end)),
-                                    build, refresh)
-    if series.empty:
-        return series
-    from_units = source_units or reported or FALLBACK_SOURCE_UNITS
-    if source_units is None and reported is None:
-        log.info("%s reports no units for %r; reading it as %s",
-                 name, variable, FALLBACK_SOURCE_UNITS)
-    factor = datum_module._length_factor(from_units, units)
-    return (series.astype(float) * factor).rename(name)
+    return cache.cached("pagaia_series_units",
+                        (name, variable, str(start), str(end)), build, refresh)
 
 
 def _reported_units(metadata, column) -> "str | None":
@@ -201,8 +192,9 @@ def _reported_units(metadata, column) -> "str | None":
     reported = properties.get("variableunitsUbidots")
     if not reported:
         return None
-    reported = str(reported).lower()
-    return reported if reported in datum_module._LENGTH_IN_MM else None
+    # Returned whatever it says, including a name no converter recognises: the caller
+    # can report the actual string, which is far more use than a bare "no units".
+    return str(reported).lower()
 
 
 def _select_variable(data: pd.DataFrame, variable: str) -> "pd.Series | None":
@@ -226,8 +218,7 @@ def _select_variable(data: pd.DataFrame, variable: str) -> "pd.Series | None":
 def station_sample(pagaia_station, discharge, *, stage_datum=None,
                    reference_elevation=None, variable: str = "stage",
                    tolerance: str = DEFAULT_MATCH_TOLERANCE, start=None, end=None,
-                   units: str = "ft", source_units: str = None,
-                   refresh: bool = False) -> Sample:
+                   units: str = "ft", refresh: bool = False) -> Sample:
     """Build a fittable :class:`Sample` from a pagaia station and field discharge.
 
     Parameters
@@ -260,10 +251,9 @@ def station_sample(pagaia_station, discharge, *, stage_datum=None,
         Window of station data to fetch. Defaults to two days either side of the
         discharge measurements.
     units : {'ft', 'm', 'cm', 'mm'}, default 'ft'
-        Units the station readings are returned in before conversion.
-    source_units : str, optional
-        Override the units the station reports its readings in. By default the
-        variable's own metadata is believed.
+        Units the station readings are converted to. The readings' true units come
+        from :mod:`limnotech_rating_curves.data.pagaia_corrections`, not from the
+        station's own metadata, which is currently wrong.
     refresh : bool, default False
         Refetch instead of using the cache.
 
@@ -286,9 +276,9 @@ def station_sample(pagaia_station, discharge, *, stage_datum=None,
     >>> sample.compare(models="all").metrics                    # doctest: +SKIP
     """
     times, flows = _discharge_measurements(discharge)
+    name = station_name(pagaia_station)
     if len(times) == 0:
-        return Sample(stage_ft=[], discharge_cfs=[],
-                      site_id=_station_name(pagaia_station), source="pagaia",
+        return Sample(stage_ft=[], discharge_cfs=[], site_id=name, source="pagaia",
                       skipped="no discharge measurements given")
 
     if start is None:
@@ -296,9 +286,12 @@ def station_sample(pagaia_station, discharge, *, stage_datum=None,
     if end is None:
         end = (times.max() + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
 
-    readings = station_series(pagaia_station, variable=variable, start=start, end=end,
-                             units=units, source_units=source_units, refresh=refresh)
-    name = _station_name(pagaia_station)
+    # Fetch, correct the units, convert - see the module docstring of
+    # pagaia_corrections for why the middle step is not optional.
+    raw = raw_station_series(pagaia_station, variable=variable, start=start, end=end,
+                             refresh=refresh)
+    meters = pagaia_corrections.to_meters(raw, name, variable=variable)
+    readings = datum_module.in_units(meters, units)
     if readings.empty:
         return Sample(stage_ft=[], discharge_cfs=[], site_id=name, source="pagaia",
                       skipped=f"no {variable} readings for {name} in {start}..{end}")

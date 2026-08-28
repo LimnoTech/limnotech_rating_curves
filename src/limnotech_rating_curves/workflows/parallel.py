@@ -469,7 +469,7 @@ class RatingCollection:
                 "site": site, "model": model, "label": saved.label,
                 "n": scores.get("n"),
                 "nse": scores.get("nse"), "rmse": scores.get("rmse"),
-                "pbias_pct": scores.get("pbias_pct"), "r2_log": scores.get("r2_log"),
+                "r2_log": scores.get("r2_log"),
                 "elpd_loo": scores.get("elpd_loo"), "se_loo": scores.get("se_loo"),
                 "pareto_k_max": scores.get("pareto_k_max"),
                 "worst_r_hat": convergence.get("worst_r_hat"),

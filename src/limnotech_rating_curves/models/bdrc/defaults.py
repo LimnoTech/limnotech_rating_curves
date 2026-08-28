@@ -22,8 +22,28 @@ ADVI_STEPS = 10_000
 #: arithmetic, is what dominates. Overridden per call; see
 #: ``settings.NUTS_SAMPLER`` for the package-wide default.
 NUTS_SAMPLER = "nutpie"
+
+#: NUTS target acceptance rate on a sample of ordinary size.
 TARGET_ACCEPT = 0.9
+
+#: A sample of this many measurements or fewer is a *short record*: the marginal
+#: posterior of a rating fitted to a handful of points has a thin ridge that NUTS
+#: diverges on at a normal step size, so it is sampled at
+#: :data:`SMALL_SAMPLE_TARGET_ACCEPT`, which forces a smaller step. Mirrors
+#: ``settings.SMALL_SAMPLE_N`` / ``settings.SMALL_SAMPLE_TARGET_ACCEPT``, the
+#: package-wide values, kept here because this backend carries its own defaults.
+SMALL_SAMPLE_N = 5
+SMALL_SAMPLE_TARGET_ACCEPT = 0.999
+
 SEED = 42
+
+
+def target_accept_for(n: int, default: float = TARGET_ACCEPT) -> float:
+    """The target acceptance rate to sample `n` measurements with.
+
+    :data:`SMALL_SAMPLE_TARGET_ACCEPT` for a short record, `default` otherwise.
+    """
+    return SMALL_SAMPLE_TARGET_ACCEPT if int(n) <= SMALL_SAMPLE_N else default
 
 # --- priors (R: bdrc:::priors) -------------------------------------------------
 # Hyperprior rate parameters and the Gaussian prior on (log a, b).

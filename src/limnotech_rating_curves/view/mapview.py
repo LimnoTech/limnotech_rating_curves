@@ -1,12 +1,22 @@
+import base64
+import io
 import json
 import logging
+import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from ..core import SiteRating
+from ..evaluate.crossval import CrossValidation
 from ..evaluate import metrics as metrics_module
 from ..models import catalog
 from .. import settings
+
+if TYPE_CHECKING:
+    import plotly.graph_objects as go
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +50,7 @@ EXTERNAL_STYLE = {
     "published_reference": {"color": "#000000", "dash": "dash", "width": 2.5,
                             "legend": "USGS published rating"},
     "spreadsheet": {"color": "#e7298a", "dash": "longdashdot", "width": 3.2,
-                    "legend": "the field spreadsheet's own equation"},
+                    "legend": "field spreadsheet equation"},
 }
 _FALLBACK_EXTERNAL = {"color": "#404040", "dash": "dot", "width": 2.5,
                       "legend": "external curve"}
@@ -62,6 +72,26 @@ MAP_DOMAIN_X = [0.0, 0.575]
 
 #: The rating plot.
 PLOT_DOMAIN_Y = [0.56, 0.94]
+
+#: The two rows above the plot, both anchored at the top and growing downward: the
+#: pane toggle, then the posterior / posterior-predictive toggle under it. The site
+#: title sits above both. ``TOP_MARGIN`` has to cover all three, or Plotly clips them.
+#: What the export archive is called. :func:`build_map` names it after the HTML it
+#: sits beside - ``hierarchical_map.html`` gets ``hierarchical_map_fits.zip`` - so
+#: several maps can share a directory, and the button offers that same name.
+#: :data:`EXPORT_ZIP_NAME` is the fallback for :func:`build_figure`, which writes
+#: nothing and so has no stem to borrow.
+EXPORT_ZIP_SUFFIX = "_fits.zip"
+EXPORT_ZIP_NAME = "rating_fits.zip"
+
+#: Where the export button sits: inside the map's top-left corner, clear of the legend
+#: in the bottom-left and of the inspector's control rows on the right.
+DOWNLOAD_XY = (0.008, 0.988)
+
+PANE_ROW_Y = 1.085
+VIEW_ROW_Y = 1.043
+TITLE_Y = 1.105
+TOP_MARGIN = 110
 
 #: The control row, present only with cross-validation: the model selector, then the
 #: fold arrows under it. Both are anchored at the top and grow downward.
@@ -270,8 +300,46 @@ def _measurement_trace(site):
                        "%{customdata[0]}<extra></extra>"))
 
 
+#: The two quantities a fitted curve can be shown as, and the columns each reads.
+#: ``line`` is the curve itself; ``band`` is its 95% interval. The posterior says
+#: where the rating is; the posterior predictive says where the next gaging would
+#: fall, and is always the wider. See ``posterior_clarification.md``.
+CURVE_VIEWS = (
+    dict(view="posterior", line="discharge_cfs",
+         band=("posterior_lower", "posterior_upper"),
+         summary="posterior mean", band_label="95% credible interval"),
+    dict(view="predictive", line="discharge_predictive_median_cfs",
+         band=("lower", "upper"),
+         summary="posterior predictive median", band_label="95% prediction interval"),
+)
+
+
+def _views_for(curve) -> list:
+    """Which of :data:`CURVE_VIEWS` this curve carries the columns for.
+
+    A least-squares fit and an externally supplied rating have one curve and no
+    posterior, so they come back tagged ``"both"`` and stay on screen whichever view
+    the reader has selected - the alternative is a curve that vanishes for no reason
+    the reader can see.
+    """
+    columns = set(curve.columns)
+    available = [dict(spec) for spec in CURVE_VIEWS if spec["line"] in columns]
+    if len(available) < 2:
+        return [dict(view="both", line="discharge_cfs", band=("lower", "upper"),
+                     summary="", band_label="95% band")]
+    for spec in available:
+        if not set(spec["band"]) <= columns:
+            spec["band"] = None
+    return available
+
+
 def _fit_pane_traces(site):
-    """The fitted-curves pane for one site: every curve, and every curve's band."""
+    """The fitted-curves pane for one site: every curve, and every curve's band.
+
+    Each Bayesian curve is drawn twice, once per entry in :data:`CURVE_VIEWS`, and
+    the view toggle picks which set is visible. Both carry the same ``legendkey``, so
+    a legend click hides a model in both views at once.
+    """
     sample_id = site.sample_id
     window = _draw_window(site)
     traces = [_measurement_trace(site)]
@@ -285,22 +353,28 @@ def _fit_pane_traces(site):
         color = catalog.color(fit.key)
         scores = fit.metrics
         bayes = fit.bayes or {}
-        # the band first, so the line draws over its own fill
-        if {"lower", "upper"} <= set(curve.columns):
-            band = _band_trace(curve["stage_ft"], curve["lower"], curve["upper"],
-                               color, sample_id, legendkey=fit.key, model=fit.key,
-                               label=f"{fit.label} - 95% band")
-            if band is not None:
-                traces.append(band)
-        traces.append(_curve_trace(
-            curve["stage_ft"], curve["discharge_cfs"], color, fit.label, sample_id,
-            dash=catalog.dash(fit.key), legendkey=fit.key, model=fit.key,
-            hovertemplate=(f"<b>{fit.label}</b><br>stage %{{x:.2f}} ft<br>"
-                           f"Q %{{y:.3g}} cfs<br>"
-                           f"NSE={_format(scores.get('nse'))} "
-                           f"R²log={_format(scores.get('r2_log'))}<br>"
-                           f"ELPD_LOO={_format(bayes.get('elpd_loo'), '{:.1f}')}"
-                           f"<extra></extra>")))
+        for spec in _views_for(curve):
+            # the band first, so the line draws over its own fill
+            if spec["band"] and set(spec["band"]) <= set(curve.columns):
+                lower, upper = spec["band"]
+                band = _band_trace(curve["stage_ft"], curve[lower], curve[upper],
+                                   color, sample_id, legendkey=fit.key,
+                                   model=fit.key, view=spec["view"],
+                                   label=f"{fit.label} {spec['band_label']}")
+                if band is not None:
+                    traces.append(band)
+            summary = f"<br><i>{spec['summary']}</i>" if spec["summary"] else ""
+            traces.append(_curve_trace(
+                curve["stage_ft"], curve[spec["line"]], color, fit.label, sample_id,
+                dash=catalog.dash(fit.key), legendkey=fit.key, model=fit.key,
+                view=spec["view"],
+                hovertemplate=(f"<b>{fit.label}</b>{summary}<br>"
+                               f"stage %{{x:.2f}} ft<br>"
+                               f"Q %{{y:.3g}} cfs<br>"
+                               f"NSE={_format(scores.get('nse'))} "
+                               f"R²log={_format(scores.get('r2_log'))}<br>"
+                               f"ELPD_LOO={_format(bayes.get('elpd_loo'), '{:.1f}')}"
+                               f"<extra></extra>")))
 
     for external in site.external_curves():
         curve = _clip(external.curve, window)
@@ -312,7 +386,7 @@ def _fit_pane_traces(site):
             band = _band_trace(curve["stage_ft"], curve["lower"], curve["upper"],
                                style["color"], sample_id, legendkey=external.key,
                                model=external.key,
-                               label=f"{external.label} - band")
+                               label=f"{external.label} band")
             if band is not None:
                 traces.append(band)
         detail = ""
@@ -325,7 +399,7 @@ def _fit_pane_traces(site):
             sample_id, dash=style["dash"], width=style["width"],
             legendkey=external.key, model=external.key,
             hovertemplate=(f"<b>{external.label}</b><br>"
-                           f"<i>{style['legend']} - not fitted here</i>"
+                           f"<i>{style['legend']}, not fitted here</i>"
                            f"<br>stage %{{x:.2f}} ft<br>Q %{{y:.3g}} cfs<br>"
                            f"NSE={_format(scores.get('nse'))} "
                            f"R²log={_format(scores.get('r2_log'))}{detail}"
@@ -454,16 +528,23 @@ def _fit_table_traces(site, rows):
         pareto_text = _format(pareto_k, "{:.2f}")
         if pareto_k is not None and np.isfinite(pareto_k) and pareto_k > threshold:
             pareto_text = "⚠" + pareto_text
+        # an ELPD its own diagnostics call unusable is marked where a reader would
+        # quote it, not only in the k_max column they might not reach
+        elpd = row.get("elpd_loo")
+        elpd_text = _format(elpd, "{:.1f}")
+        if (not row.get("reliable", True) and elpd is not None
+                and np.isfinite(elpd)):
+            elpd_text = "⚠" + elpd_text
         label = str(row.get("model_label", row.get("model", "")))
         body.append([label[:34],
                      _format(row.get("n"), "{:.0f}"), _format(row.get("nse")),
                      _format(row.get("rmse"), "{:.3g}"), _format(row.get("r2_log")),
-                     _format(row.get("elpd_loo"), "{:.1f}"),
+                     elpd_text,
                      _format(row.get("se_loo"), "{:.1f}"),
                      _format(row.get("p_loo"), "{:.1f}"), pareto_text])
     footer = ("hover any header or cell for what the metric means",
-              "ELPD_LOO ranks generalization; NSE ranks in-sample closeness - they "
-              "disagree on purpose")
+              "ELPD_LOO ranks prediction on unseen measurements. NSE ranks fit to "
+              "the measurements in hand. They often disagree.")
     return _grid_traces(site.sample_id, "fit", "table", _FIT_TABLE_HEADERS,
                         _FIT_TABLE_GLOSSARY, _FIT_TABLE_WIDTHS, body, footer)
 
@@ -507,23 +588,23 @@ def _cv_table_traces(site, cv_entry, fold):
     support = cv_entry.get("support", {}) or {}
     footer = [
         f"scheme: {scheme.get('description', 'cross-validation')}; folds fitted by "
-        f"{str(cv_entry.get('fold_method', 'advi')).upper()}",
-        ("'all folds' is pooled over every held-out prediction - a per-fold NSE is "
-         "undefined when one point is held out"
+        f"{str(cv_entry.get('fold_method', 'nuts')).upper()}",
+        ("'all folds' is pooled over every held-out prediction, because a per-fold "
+         "NSE means nothing when only one point is held out"
          if headline == "pooled" else
-         "'all folds' is mean±sd across folds; the sd is how much the model swings "
-         "between training draws"),
-        "ELPD_LOO comes from the all-data NUTS fit, not from these folds: PSIS-LOO "
-        "reweights one posterior to approximate leaving each",
-        "point out, so it uses every measurement at once. Fold scores are honest "
-        "refits; ELPD is an approximation. Read both.",
+         "'all folds' is mean±sd across folds. The sd says how much the model moves "
+         "when the training set changes"),
+        "ELPD_LOO comes from the all-data NUTS fit, not from these folds. PSIS-LOO "
+        "reweights one posterior to approximate leaving",
+        "each point out, so every measurement is used at once. Fold scores are real "
+        "refits, ELPD is an approximation. Read both.",
     ]
     if support:
         footer.append(
             f"sample support: n={support.get('n')}, "
-            f"{support.get('distinct_discharge')} distinct discharges spanning "
-            f"x{_format(support.get('discharge_span_ratio'), '{:.1f}')} - "
-            f"{'identifiable' if support.get('identifiable') else 'too narrow to identify a rating'}")
+            f"{support.get('distinct_discharge')} distinct discharges over a "
+            f"x{_format(support.get('discharge_span_ratio'), '{:.1f}')} range, "
+            f"{'wide enough to identify a rating' if support.get('identifiable') else 'too narrow to identify a rating'}")
 
     glossary = ("curve", "n", "nse", "r2_log", "nse", "r2_log", "elpd_loo")
     return _grid_traces(site.sample_id, "cv", "cvtable", _CV_TABLE_HEADERS, glossary,
@@ -546,14 +627,14 @@ def _cv_pane_traces(site, cv_entry):
             band = _band_trace(fold["stage_ft"], fold["q_lower"], fold["q_upper"],
                                color, sample_id, pane="cv", legendkey=model_key,
                                model=model_key, fold=index,
-                               label=f"{model_entry['label']} - 95% band")
+                               label=f"{model_entry['label']} 95% band")
             if band is not None:
                 traces.append(band)
             traces.append(_curve_trace(
                 fold["stage_ft"], fold["q_median"], color,
-                f"{model_entry['label']} - fold {index}", sample_id, pane="cv",
+                f"{model_entry['label']}, fold {index}", sample_id, pane="cv",
                 dash=line_dash, legendkey=model_key, model=model_key, fold=index,
-                hovertemplate=(f"<b>{model_entry['label']} - fold {index}</b><br>"
+                hovertemplate=(f"<b>{model_entry['label']}, fold {index}</b><br>"
                                f"stage %{{x:.2f}} ft<br>Q %{{y:.3g}} cfs<br>"
                                f"held-out NSE={_format(scores.get('nse'))} "
                                f"R²log={_format(scores.get('r2_log'))}"
@@ -640,7 +721,7 @@ def _panel_range(site, cv_entry=None) -> list:
     pad = 0.05 * ((x1 - x0) or 1.0)
     y0 = np.log10(min(discharges) * 0.6) if discharges else -1.0
     y1 = np.log10(max(discharges) * 1.8) if discharges else 1.0
-    title = f"{site.label}  (n={len(site.sample)}) - stage: {site.stage_label}"
+    title = f"{site.label}  (n={len(site.sample)}, stage: {site.stage_label})"
     return [x0 - pad, x1 + pad, float(y0), float(y1), title]
 
 
@@ -726,14 +807,103 @@ def _map_markers(sites):
                            "%{customdata[3]}<br>"
                            "R²log %{customdata[4]:.2f}, "
                            "ELPD_LOO %{customdata[5]:.1f}<br>"
-                           "<i>hover holds the inspector →</i><extra></extra>")))
+                           "<i>the panel on the right follows this hover</i>"
+                           "<extra></extra>")))
     return traces
 
 
 # --- controls and layout ------------------------------------------------------
 
-def _controls(cv_models, has_cv: bool):
-    """The inspector's buttons: pane toggle, model selector, fold arrows.
+# --- the downloadable export bundle -------------------------------------------
+# The map is one self-contained HTML file, so the export it offers has to travel
+# inside it. Every fit is written to a temporary directory through the ordinary
+# exports writer - the same manifest and posterior a scripted export produces, not a
+# second format - zipped, and embedded as base64. The button then hands the browser
+# that one blob. Building the zip in Python rather than in JavaScript is what keeps
+# the injected script to a few lines and the archive byte-identical to a local export.
+
+def _archive_folder(sample_id) -> str:
+    """A sample id as a directory name inside the export archive.
+
+    The same substitution the export writer applies to a file stem, so a folder and
+    the files in it agree: ``magl:SR-04`` becomes ``magl__SR-04``. A colon is not a
+    legal path component on Windows, and a slash would silently nest.
+    """
+    return str(sample_id).replace(":", "__").replace("/", "-")
+
+
+def export_bundle(sites, *, require_posterior: bool = False) -> "tuple[bytes, int, list]":
+    """Every drawable fit at every site, as a zip of manifests and posteriors.
+
+    Returns the archive's bytes rather than a rendering of them, because both places
+    it goes need the same ones: :func:`build_map` writes it beside the HTML *and*
+    embeds it in the page, and the button has to hand back the file that is sitting
+    on disk, not a second archive built separately that happens to look like it.
+
+    Parameters
+    ----------
+    sites : list of SiteRating
+        The sites being drawn.
+    require_posterior : bool, default False
+        Passed to :func:`~limnotech_rating_curves.exports.save_rating`. False here
+        deliberately: a map is a picture, and a fit whose draws did not survive into
+        this process should still contribute its manifest rather than abort the whole
+        archive.
+
+    Returns
+    -------
+    tuple
+        ``(zip bytes, uncompressed byte count, list of archive names)``. The bytes are
+        empty when nothing could be exported.
+    """
+    import tempfile
+    import zipfile
+    from .. import exports
+
+    written, raw_bytes = [], 0
+    buffer = io.BytesIO()
+    with tempfile.TemporaryDirectory() as staging:
+        staged = Path(staging)
+        for site in sites:
+            # one folder per sensor. A manifest finds its posterior by basename in its
+            # own directory, so the pair has to stay together - which a folder per site
+            # guarantees, while a flat archive of sixty-odd files does not make obvious.
+            folder = staged / _archive_folder(site.sample_id)
+            for fit in site.fits:
+                if not _drawable(fit):
+                    continue
+                try:
+                    exports.save_fit(fit, site.sample, folder,
+                                     sample_id=site.sample_id,
+                                     require_posterior=require_posterior)
+                except Exception as exc:  # noqa: BLE001 - one fit must not sink the map
+                    log.warning("no export for %s / %s (%s: %s)", site.sample_id,
+                                fit.key, type(exc).__name__, str(exc)[:120])
+        files = sorted(path for path in staged.rglob("*") if path.is_file())
+        if not files:
+            return b"", 0, []
+        # deflate: a posterior is float64 draws and compresses usefully, and the
+        # archive is about to be base64'd into an HTML file where a third again of
+        # its size is not free
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in files:
+                arcname = path.relative_to(staged).as_posix()
+                archive.write(path, arcname=arcname)
+                written.append(arcname)
+                raw_bytes += path.stat().st_size
+    archive_bytes = buffer.getvalue()
+    log.info("export bundle: %d file(s) in %d folder(s), %.1f MB raw -> %.1f MB zipped",
+             len(written), len({name.split("/")[0] for name in written}),
+             raw_bytes / 1e6, len(archive_bytes) / 1e6)
+    return archive_bytes, raw_bytes, written
+
+
+def _controls(cv_models, has_cv: bool, has_exports: bool = False):
+    """The inspector's buttons: pane toggle, view toggle, export, model selector, folds.
+
+    The view toggle chooses whether a Bayesian curve is drawn as the posterior of the
+    rating or as its posterior predictive - the difference the reader most often needs
+    to see, and the one a single curve cannot show.
 
     Every button uses Plotly's ``skip`` method, so clicking it changes nothing by
     itself - it only announces a selection (``args[0]`` = what, ``args[1]`` = value)
@@ -751,19 +921,41 @@ def _controls(cv_models, has_cv: bool):
     if has_cv:
         pane_buttons.append(dict(label="Cross-validation", method="skip",
                                  args=["pane", "cv"]))
-    menus = [dict(type="buttons", direction="right", showactive=True, active=0,
-                  x=PANEL_X[0], xanchor="left", y=1.045, yanchor="top",
-                  buttons=pane_buttons, pad=dict(r=4, t=2), bgcolor=background)]
+    menus = [dict(name="pane", type="buttons", direction="right", showactive=True,
+                  active=0, x=PANEL_X[0], xanchor="left", y=PANE_ROW_Y,
+                  yanchor="top",
+                  buttons=pane_buttons, pad=dict(r=4, t=2), bgcolor=background),
+             dict(name="view", type="buttons", direction="right", showactive=True,
+                  active=0, x=PANEL_X[0], xanchor="left", y=VIEW_ROW_Y,
+                  yanchor="top",
+                  pad=dict(r=4, t=2), bgcolor=background,
+                  buttons=[dict(label="Posterior", method="skip",
+                                args=["view", "posterior"]),
+                           dict(label="Posterior predictive", method="skip",
+                                args=["view", "predictive"])])]
+    if has_exports:
+        # showactive False: this one performs an action rather than selecting a state,
+        # so leaving it latched would misreport it as a mode the map is now in
+        # inside the map's top-left corner, where a map's own controls live. Not in
+        # the panel: its rows are full, and this exports every site at once rather
+        # than the one being inspected. Not floating above the figure either, which
+        # left it stranded between the title and nothing.
+        menus.append(dict(
+            name="download", type="buttons", direction="right", showactive=False,
+            x=DOWNLOAD_XY[0], xanchor="left", y=DOWNLOAD_XY[1], yanchor="top",
+            pad=dict(r=4, t=2), bgcolor=background,
+            buttons=[dict(label="⤓ Export fits (.zip)", method="skip",
+                          args=["download", "exports"])]))
     if has_cv and cv_models:
         menus.append(dict(
-            type="buttons", direction="right", showactive=True, active=0,
+            name="model", type="buttons", direction="right", showactive=True, active=0,
             visible=False, x=PANEL_X[0], xanchor="left", y=MODEL_ROW_Y,
             yanchor="top", pad=dict(t=2, r=2), bgcolor=background,
             buttons=[dict(label=catalog.short_label(key), method="skip",
                           args=["model", key]) for key, _ in cv_models]))
         menus.append(dict(
-            type="buttons", direction="right", showactive=False, visible=False,
-            x=PANEL_X[0], xanchor="left", y=FOLD_ROW_Y, yanchor="top",
+            name="fold", type="buttons", direction="right", showactive=False,
+            visible=False, x=PANEL_X[0], xanchor="left", y=FOLD_ROW_Y, yanchor="top",
             pad=dict(t=2, r=2), bgcolor=background,
             buttons=[dict(label="◀ prev fold", method="skip", args=["foldstep", -1]),
                      dict(label="next fold ▶", method="skip", args=["foldstep", 1])]))
@@ -792,6 +984,10 @@ def layout_boxes(has_cv: bool) -> dict:
         "table": (PANEL_X[0], table_y[0], PANEL_X[1], table_y[1]),
         "map": (MAP_DOMAIN_X[0], 0.0, MAP_DOMAIN_X[1], 1.0),
     }
+    boxes["pane_buttons"] = (PANEL_X[0], PANE_ROW_Y - BUTTON_ROW_HEIGHT,
+                             PANEL_X[1], PANE_ROW_Y)
+    boxes["view_buttons"] = (PANEL_X[0], VIEW_ROW_Y - BUTTON_ROW_HEIGHT,
+                             PANEL_X[1], VIEW_ROW_Y)
     if has_cv:
         boxes["model_buttons"] = (PANEL_X[0], MODEL_ROW_Y - BUTTON_ROW_HEIGHT,
                                   PANEL_X[1], MODEL_ROW_Y)
@@ -830,6 +1026,20 @@ def layout_overlaps(has_cv: bool) -> list:
     return clashes
 
 
+def _cv_payloads(cv_data) -> dict:
+    """``{sample_id: CrossValidation}`` as the pane's payload dicts.
+
+    Callers hand over the :class:`CrossValidation` results themselves; the payload
+    shape is this module's business, not theirs. Payload dicts are still accepted so
+    an already-converted mapping keeps working.
+    """
+    if not cv_data:
+        return {}
+    return {sample_id: (result.to_map_payload()
+                        if isinstance(result, CrossValidation) else result)
+            for sample_id, result in cv_data.items()}
+
+
 def _cv_model_list(cv_data) -> list:
     """``[(model key, label)]`` across every site, in catalog order."""
     seen = {}
@@ -850,9 +1060,12 @@ def _site_folds(cv_entry) -> list:
     return sorted(folds)
 
 
-def build_figure(sites, cv_data=None, *, comparison_rows=None,
-                 title="Rating curves - hover a site to inspect its fits",
-                 default_site=None) -> tuple:
+def build_figure(sites: list[SiteRating],
+                 cv_data: dict[str, CrossValidation] | None = None, *,
+                 comparison_rows: Callable[[SiteRating], list[dict[str, Any]]] | None = None,
+                 title: str = "Rating curves. Hover a site to see its fits.",
+                 default_site: str | None = None,
+                 exports: bool = False) -> tuple["go.Figure", str]:
     """Assemble the figure and its inspector script, without writing anything.
 
     Separate from :func:`build_map` so the structure can be checked in a test - the
@@ -861,7 +1074,7 @@ def build_figure(sites, cv_data=None, *, comparison_rows=None,
 
     Parameters
     ----------
-    sites : sequence of SiteRating
+    sites : list of :class:`~limnotech_rating_curves.core.SiteRating`
         The sites to draw. Sites with no coordinates or no successful fit are skipped.
     cv_data : dict, optional
         See :func:`build_map`.
@@ -871,6 +1084,12 @@ def build_figure(sites, cv_data=None, *, comparison_rows=None,
         Figure title.
     default_site : str, optional
         ``sample_id`` the inspector opens on.
+    exports : bool, default False
+        Embed the fits' manifests and posteriors as a downloadable zip, one folder per
+        sensor, and add the button that saves it. Off by default because it writes
+        every posterior in the run and can multiply the page's size - see
+        :func:`export_bundle`. No sidecar file here: this function writes nothing, so
+        only :func:`build_map` can put one beside an HTML.
 
     Returns
     -------
@@ -883,27 +1102,34 @@ def build_figure(sites, cv_data=None, *, comparison_rows=None,
     ValueError
         If no site has both coordinates and a fitted curve.
     """
-    return _assemble(sites, cv_data, comparison_rows, title, default_site)
+    figure, script, _ = _assemble(sites, cv_data, comparison_rows, title,
+                                  default_site, exports)
+    return figure, script
 
 
-def build_map(sites, output_html=None, cv_data=None, *, comparison_rows=None,
-              title="Rating curves - hover a site to inspect its fits",
-              default_site=None) -> str:
+def build_map(sites: list[SiteRating],
+              output_html: str | os.PathLike[str] | None = None,
+              cv_data: dict[str, CrossValidation] | None = None, *,
+              comparison_rows: Callable[[SiteRating], list[dict[str, Any]]] | None = None,
+              title: str = "Rating curves. Hover a site to see its fits.",
+              default_site: str | None = None,
+              exports: bool = True) -> str:
     """Assemble and write the interactive map.
 
     Parameters
     ----------
-    sites : sequence of SiteRating
+    sites : list of :class:`~limnotech_rating_curves.core.SiteRating`
         The sites to draw. Sites with no coordinates or no successful fit are
         skipped.
     output_html : path-like, optional
         Where to write. Defaults to ``settings.MAP_HTML``.
     cv_data : dict, optional
-        Cross-validation payload keyed by ``sample_id``, each value being
-        :meth:`CrossValidation.to_map_payload` output - the fold curves *and* the
-        pooled / per-fold summary tables and the scheme. When omitted the
-        cross-validation pane and its controls are left out entirely and the score
-        table takes the extra room.
+        ``{sample_id: CrossValidation}`` - the cross-validation results themselves,
+        as :func:`~limnotech_rating_curves.workflows.batch.cross_validate_sites`
+        returns them. The fold curves, the pooled / per-fold summary tables and the
+        scheme are read off each result here. When omitted the cross-validation pane
+        and its controls are left out entirely and the score table takes the extra
+        room.
     comparison_rows : callable, optional
         ``f(site) -> list of dict`` producing the score-table rows. Defaults to
         :func:`limnotech_rating_curves.evaluate.metrics.comparison_rows`.
@@ -911,6 +1137,17 @@ def build_map(sites, output_html=None, cv_data=None, *, comparison_rows=None,
         Figure title.
     default_site : str, optional
         ``sample_id`` the inspector opens on. Defaults to the first site.
+    exports : bool, default False
+        Write every fit's manifest and posterior as a zip beside the HTML, *and* embed
+        the same archive in the page behind a download button. One folder per sensor,
+        holding the same pair of files a scripted export writes, so what comes out of
+        either route loads with
+        :func:`~limnotech_rating_curves.exports.load_rating`. The sidecar is named
+        after the map - ``hierarchical_map.html`` gets ``hierarchical_map_fits.zip`` -
+        and the button offers that same name.
+
+        Off by default: embedding adds roughly the zipped size of the run's posteriors,
+        times four thirds for base64, to the page.
 
     Returns
     -------
@@ -923,17 +1160,32 @@ def build_map(sites, output_html=None, cv_data=None, *, comparison_rows=None,
         If no site has both coordinates and a fitted curve, since there would be
         nothing to draw.
     """
-    figure, script = _assemble(sites, cv_data, comparison_rows, title, default_site)
     path = Path(settings.MAP_HTML if output_html is None else output_html)
     path.parent.mkdir(parents=True, exist_ok=True)
+    zip_name = f"{path.stem}{EXPORT_ZIP_SUFFIX}"
+    figure, script, archive = _assemble(sites, cv_data, comparison_rows, title,
+                                        default_site, exports, zip_name)
     figure.write_html(str(path), post_script=script, config={"scrollZoom": True},
                       include_plotlyjs=True)
     log.info("map -> %s (%d traces)", path, len(figure.data))
+    if archive:
+        # the same bytes the page carries, so the sidecar and the button's download
+        # are one file that happens to be reachable two ways
+        sidecar = path.parent / zip_name
+        sidecar.write_bytes(archive)
+        log.info("exports -> %s (%.1f MB, also embedded in the page)", sidecar,
+                 len(archive) / 1e6)
     return str(path)
 
 
-def _assemble(sites, cv_data, comparison_rows, title, default_site) -> tuple:
-    """Build the figure and the inspector script. See :func:`build_figure`."""
+def _assemble(sites, cv_data, comparison_rows, title, default_site,
+              exports: bool = False, zip_name: str = None) -> tuple:
+    """Build the figure, the inspector script, and the export archive.
+
+    Returns ``(figure, script, archive_bytes)``. The third element is what lets
+    :func:`build_map` write the sidecar zip from the same bytes the page carries;
+    :func:`build_figure` has no file to write and drops it. See :func:`build_figure`.
+    """
     import plotly.graph_objects as go
 
     if comparison_rows is None:
@@ -942,8 +1194,17 @@ def _assemble(sites, cv_data, comparison_rows, title, default_site) -> tuple:
     if not sites:
         raise ValueError("no site has both coordinates and a fitted curve, so there "
                          "is nothing to map")
-    cv_data = cv_data or {}
+    cv_data = _cv_payloads(cv_data)
     has_cv = bool(cv_data)
+    archive = b""
+    if exports:
+        archive, _, names = export_bundle(sites)
+        if not names:
+            log.warning("exports were asked for but no fit could be written, so the "
+                        "map carries no download button")
+    # base64 so the archive can live in a JavaScript string literal; the button
+    # decodes exactly these bytes, which are also what build_map writes to disk
+    export_zip = base64.b64encode(archive).decode("ascii") if archive else ""
 
     traces, ranges, folds_by_site = [], {}, {}
     for site in sites:
@@ -993,9 +1254,10 @@ def _assemble(sites, cv_data, comparison_rows, title, default_site) -> tuple:
                     bgcolor="rgba(255,255,255,0.82)", bordercolor="#bbbbbb",
                     borderwidth=1, font=dict(size=10), groupclick="togglegroup",
                     itemsizing="constant"),
-        updatemenus=_controls(cv_models, has_cv=has_cv),
+        updatemenus=_controls(cv_models, has_cv=has_cv,
+                              has_exports=bool(export_zip)),
         annotations=[
-            dict(x=(PANEL_X[0] + PANEL_X[1]) / 2, y=1.005, xref="paper",
+            dict(x=(PANEL_X[0] + PANEL_X[1]) / 2, y=TITLE_Y, xref="paper",
                  yref="paper", xanchor="center", yanchor="bottom", showarrow=False,
                  font=dict(size=12, color="#333"),
                  text="hover a site"),                       # [0] the site title
@@ -1003,7 +1265,8 @@ def _assemble(sites, cv_data, comparison_rows, title, default_site) -> tuple:
                  xanchor="right", yanchor="top", showarrow=False,
                  font=dict(size=11, color="#333"),
                  text="")],                                  # [1] the fold indicator
-        margin=dict(l=0, r=10, t=80, b=20), dragmode="pan", hovermode="closest",
+        margin=dict(l=0, r=10, t=TOP_MARGIN, b=20), dragmode="pan",
+        hovermode="closest",
         paper_bgcolor="white", plot_bgcolor="white"))
 
     opening = default_site if default_site in ranges else sites[0].sample_id
@@ -1011,10 +1274,13 @@ def _assemble(sites, cv_data, comparison_rows, title, default_site) -> tuple:
               .replace("__RANGES__", json.dumps(ranges))
               .replace("__FOLDS__", json.dumps(folds_by_site))
               .replace("__DEFAULT__", json.dumps(opening))
-              .replace("__HASCV__", json.dumps(has_cv)))
+              .replace("__HASCV__", json.dumps(has_cv))
+              .replace("__EXPORTZIP__", json.dumps(export_zip))
+              .replace("__EXPORTNAME__",
+                       json.dumps(zip_name or EXPORT_ZIP_NAME)))
     log.info("assembled %d site(s), %d trace(s), %d legend key(s)", len(sites),
              len(traces), len(legend_keys))
-    return figure, script
+    return figure, script, archive
 
 
 _INSPECTOR_JS = r"""
@@ -1023,16 +1289,28 @@ var RANGES = __RANGES__;      // sample_id -> [x0, x1, log10 y0, log10 y1, title
 var FOLDS = __FOLDS__;        // sample_id -> [fold indices]
 var DEFAULT_SITE = __DEFAULT__;
 var HAS_CV = __HASCV__;
+var EXPORT_ZIP = __EXPORTZIP__;      // base64 of the manifests + posteriors, or ''
+var EXPORT_NAME = __EXPORTNAME__;
 
 // the inspector's whole state; every control mutates this and repaints. `hidden`
 // holds the legend groups the reader has switched off, which is why a legend click
 // survives the next repaint.
-var state = {site: DEFAULT_SITE, pane: 'fit', model: null, fold: null, hidden: {}};
+var state = {site: DEFAULT_SITE, pane: 'fit', view: 'posterior', model: null,
+             fold: null, hidden: {}};
+
+// menus are found by name, not by position, so adding one does not renumber the rest
+function menuIndex(name) {
+    var menus = gd.layout.updatemenus || [];
+    for (var i = 0; i < menus.length; i++) {
+        if (menus[i].name === name) return i;
+    }
+    return -1;
+}
 
 function modelButtons() {
-    var menus = gd.layout.updatemenus || [];
-    return (menus.length > 1) ? menus[1].buttons.map(function (b) { return b.args[1]; })
-                              : [];
+    var at = menuIndex('model');
+    return (at < 0) ? []
+        : gd.layout.updatemenus[at].buttons.map(function (b) { return b.args[1]; });
 }
 
 function firstModel() {
@@ -1043,6 +1321,9 @@ function firstModel() {
 function isVisible(tag) {
     if (!tag || tag.sample !== state.site) return false;
     if (tag.legendkey && state.hidden[tag.legendkey]) return false;
+    // a curve with no posterior (least-squares, or somebody else's rating) is tagged
+    // 'both' and stays on screen in either view
+    if (tag.view && tag.view !== 'both' && tag.view !== state.view) return false;
     if (tag.pane === 'both') return true;
     if (tag.pane !== state.pane) return false;
     if (state.pane === 'cv') {
@@ -1052,6 +1333,25 @@ function isVisible(tag) {
         if (tag.kind === 'cvtable') return tag.fold === state.fold;
     }
     return true;
+}
+
+// The zip was built in Python and embedded as base64; this only has to turn it back
+// into bytes and let the browser save it. An <a download> click is the one route that
+// works from a file:// page without a server behind it.
+function downloadExports() {
+    if (!EXPORT_ZIP) return;
+    var binary = atob(EXPORT_ZIP);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    var url = URL.createObjectURL(new Blob([bytes], {type: 'application/zip'}));
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = EXPORT_NAME;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    // the object URL holds the whole archive in memory until it is released
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
 }
 
 function siteFolds() { return FOLDS[state.site] || []; }
@@ -1074,15 +1374,23 @@ function stepFold(delta) {
 function updateControls() {
     var inCv = state.pane === 'cv';
     var relayout = {};
-    var menus = gd.layout.updatemenus || [];
+    var paneMenu = menuIndex('pane'), viewMenu = menuIndex('view');
+    var modelMenu = menuIndex('model'), foldMenu = menuIndex('fold');
+    if (viewMenu >= 0) {
+        // the toggle applies to the fitted curves; the cross-validation pane draws
+        // fold curves, which have one summary apiece
+        relayout['updatemenus[' + viewMenu + '].visible'] = !inCv;
+        relayout['updatemenus[' + viewMenu + '].active'] =
+            (state.view === 'predictive') ? 1 : 0;
+    }
     if (HAS_CV) {
-        relayout['updatemenus[0].active'] = inCv ? 1 : 0;
-        if (menus.length > 1) {
+        if (paneMenu >= 0) relayout['updatemenus[' + paneMenu + '].active'] = inCv ? 1 : 0;
+        if (modelMenu >= 0) {
             var at = modelButtons().indexOf(state.model);
-            relayout['updatemenus[1].visible'] = inCv;
-            relayout['updatemenus[1].active'] = at < 0 ? 0 : at;
+            relayout['updatemenus[' + modelMenu + '].visible'] = inCv;
+            relayout['updatemenus[' + modelMenu + '].active'] = at < 0 ? 0 : at;
         }
-        if (menus.length > 2) relayout['updatemenus[2].visible'] = inCv;
+        if (foldMenu >= 0) relayout['updatemenus[' + foldMenu + '].visible'] = inCv;
     }
     var folds = siteFolds();
     relayout['annotations[1].text'] = (inCv && state.fold !== null)
@@ -1182,6 +1490,11 @@ gd.on('plotly_buttonclicked', function (event) {
     if (args[0] === 'pane') {
         state.pane = args[1];
         if (HAS_CV) clampFold();
+    } else if (args[0] === 'view') {
+        state.view = args[1];
+    } else if (args[0] === 'download') {
+        downloadExports();
+        return;                       // an action, not a state change: nothing to repaint
     } else if (args[0] === 'model') {
         state.model = args[1];
     } else if (args[0] === 'foldstep') {

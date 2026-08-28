@@ -503,15 +503,13 @@ def run(models=None, *, samples=None, sites=None, sources=None, min_points: int 
         log.info("saved ratings -> %s (%d manifest(s), %d with posterior draws)",
                  posterior_dir, len(written), with_draws)
 
-    cv_results, cv_payload = {}, None
+    cv_results = {}
     if cross_validate:
         log.info("== cross-validation sweep ==")
         cv_results = cross_validate_sites(
             site_ratings, models=models, scheme=cv_scheme, holdout=cv_holdout,
             n_splits=cv_splits, n_train=cv_train_n, seed=seed,
             nuts_sampler=nuts_sampler)
-        cv_payload = {sample_id: result.to_map_payload()
-                      for sample_id, result in cv_results.items()}
         if write_csv and cv_results:
             frames = []
             for sample_id, result in cv_results.items():
@@ -538,7 +536,7 @@ def run(models=None, *, samples=None, sites=None, sources=None, min_points: int 
     log.info("== interactive map ==")
     map_path = mapview.build_map(
         site_ratings, map_html or (output_dir / "rating_curves_map.html"),
-        cv_data=cv_payload)
+        cv_data=cv_results or None)
 
     return Report(map_path=Path(map_path), results=results, sites=site_ratings,
                   cross_validation=cv_results)

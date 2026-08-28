@@ -135,20 +135,6 @@ class PolynomialRating:
                              "lower": np.atleast_1d(lower),
                              "upper": np.atleast_1d(upper)})
 
-    def equation(self, precision: int = 6) -> str:
-        """The fitted polynomial, in the form a spreadsheet would print it."""
-        terms = []
-        for power, coefficient in zip(range(self.degree, -1, -1), self.coefficients):
-            value = f"{coefficient:.{precision}g}"
-            if power == 0:
-                terms.append(value)
-            elif power == 1:
-                terms.append(f"{value} h")
-            else:
-                terms.append(f"{value} h^{power}")
-        joined = " + ".join(terms).replace("+ -", "- ")
-        return f"Q = {joined}"
-
     def __repr__(self):
         low, high = self.effective_range
         return (f"PolynomialRating(degree={self.degree}, r2={self.r_squared:.4f}, "
@@ -315,7 +301,6 @@ def fit(sample, *, key: str, label: str, degree: int = 2, min_points: int = 4,
     result.metrics = fit_metrics(discharge, result.predicted)
     result.config.update({
         "coefficients": [float(value) for value in fitted.coefficients],
-        "equation": fitted.equation(),
         "r_squared": fitted.r_squared,
         "effective_range": list(fitted.effective_range),
         "turning_point": fitted.turning_point})

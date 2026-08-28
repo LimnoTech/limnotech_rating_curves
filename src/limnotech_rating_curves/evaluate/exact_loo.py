@@ -558,3 +558,203 @@ def refine(fit, sample, entry, *, fit_arguments: dict = None,
             "pareto_k": pareto_k.tolist(),
             **extra,
             "note": note}
+
+
+# --- the hierarchical family ---------------------------------------------------
+# Its refits are a different shape from the two above. There, one refit drops one
+# measurement from one site's own model. Here every site shares a single model, so
+# dropping one measurement means refitting *all* of them - the cost per flagged point
+# is a whole joint fit, and the budget has to be read with that in mind.
+
+def _held_out_log_likelihood(fit, site: str, stage_ft: float,
+                             discharge_cfs: float) -> np.ndarray:
+    """Per-draw log density of one measurement under a joint fit that never saw it.
+
+    Evaluated from the refit's own posterior for that site, through the same two
+    methods the likelihood is built from - :meth:`SitePosterior.log_discharge` for the
+    mean and :meth:`SitePosterior.scatter` for the spread - so this cannot drift away
+    from the model it is scoring.
+
+    Parameters
+    ----------
+    fit : HierarchicalFit
+        A fit made without this measurement.
+    site : str
+        Which site it belongs to. Must still be present in `fit`.
+    stage_ft, discharge_cfs : float
+        The held-out measurement.
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape ``(draws,)``, a density on raw log discharge. A draw that puts its stage
+        of zero flow above this measurement's stage carries no flow there, so it gives
+        the measurement a density of zero, recorded as ``-inf`` rather than dropped -
+        that draw genuinely says the measurement is impossible, and averaging it away
+        would quietly flatter the fold. All ``-inf`` means every draw said so, which
+        the caller reports rather than folding into a total.
+    """
+    posterior = fit._posteriors.get(site)
+    if posterior is None:
+        return np.full(1, -np.inf)
+    stage = np.atleast_1d(float(stage_ft))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.asarray(posterior.log_discharge(stage), float)[:, 0]
+        spread = np.asarray(posterior.scatter(stage), float)[:, 0]
+        density = normal_logpdf(np.log(float(discharge_cfs)), mean, spread)
+    # below a draw's stage of zero flow the mean is undefined, not merely small
+    return np.where(np.isfinite(mean) & np.isfinite(spread) & (spread > 0),
+                    density, -np.inf)
+
+
+def refine_hierarchical(scores: dict, idata, observations, model, *,
+                        seed: int = settings.SEED, nuts_sampler: str = None,
+                        k_threshold: float = None, fraction: float = None,
+                        max_refits: int = None) -> dict:
+    """Repair each site's ``elpd_loo`` by refitting the joint model without its
+    flagged measurements.
+
+    Parameters
+    ----------
+    scores : dict
+        ``{site: scores}`` from :func:`..models.hierarchical._site_scores`.
+    idata : arviz.InferenceData
+        The all-data joint posterior. Carried for the record; the repair works from
+        `observations` and refits from scratch.
+    observations : pandas.DataFrame
+        One row per fitted measurement, in log-likelihood order, with ``site``,
+        ``stage_ft`` and ``discharge_cfs``.
+    model : pymc.Model
+        The all-data model, for its site ordering.
+    seed : int
+        Base seed; the fold holding out measurement *i* uses ``seed + 1 + i``.
+    nuts_sampler : str, optional
+    k_threshold : float, optional
+        Pareto-k above which a measurement is refitted. Defaults to
+        ``settings.PARETO_K_GOOD``.
+    fraction, max_refits
+        Budget, as :func:`refit_budget` applies them. **Set ``max_refits``**: the
+        default fraction allows a quarter of every measurement in the fit, and each
+        one costs a full joint fit.
+
+    Returns
+    -------
+    dict
+        `scores`, with each refitted site's ``elpd_loo`` repaired and
+        ``elpd_loo_psis``, ``n_refits`` and ``n_flagged`` recorded.
+    """
+    from ..models.hierarchical import fit_hierarchical
+
+    threshold = settings.PARETO_K_GOOD if k_threshold is None else float(k_threshold)
+    sites = np.asarray(observations["site"].to_numpy())
+    # Scattered into place by site rather than concatenated in site order. The two
+    # agree today, because `_observations` lays sites out in blocks - but a k attached
+    # to the wrong measurement is still a valid float at a valid index, so the
+    # alignment is made explicit instead of assumed.
+    pareto_k = np.full(sites.size, np.nan)
+    for site in dict.fromkeys(sites):
+        columns = np.flatnonzero(sites == site)
+        values = np.asarray((scores.get(site) or {}).get("pareto_k", []), float)
+        if values.size != columns.size:
+            log.warning("cannot reloo: %s has %d Pareto-k values for %d measurements",
+                        site, values.size, columns.size)
+            return scores
+        pareto_k[columns] = values
+    if not np.isfinite(pareto_k).all():
+        log.warning("cannot reloo: %d measurement(s) have no Pareto-k",
+                    int((~np.isfinite(pareto_k)).sum()))
+        return scores
+
+    flagged = np.flatnonzero(pareto_k > threshold)
+    budget = refit_budget(sites.size, fraction=fraction, max_refits=max_refits)
+    # Worst first: the budget should be spent where PSIS is furthest from the truth.
+    order = flagged[np.argsort(-pareto_k[flagged])][:budget]
+    log.warning("reloo: %d of %d measurement(s) above Pareto-k %g; refitting %d, "
+                "each a full joint fit - expect roughly %d minute(s)",
+                flagged.size, sites.size, threshold, order.size,
+                max(1, round(order.size * 55 / 60)))
+    if not order.size:
+        return scores
+
+    repaired = {site: dict(entry) for site, entry in scores.items()}
+    for site, entry in repaired.items():
+        entry.setdefault("elpd_loo_psis", entry.get("elpd_loo"))
+        entry.setdefault("n_refits", 0)
+        entry["n_flagged"] = int(np.sum(pareto_k[sites == site] > threshold))
+
+    from scipy.special import logsumexp
+
+    from ..core import Sample
+    for position in order:
+        index = int(position)
+        site = str(sites[index])
+        kept = observations.drop(observations.index[index])
+        rebuilt = {name: Sample.of(rows, site_id=name, source="reloo")
+                   for name, rows in kept.groupby("site", sort=False)}
+        try:
+            fold = fit_hierarchical(rebuilt, reference=False, seed=seed + 1 + index,
+                                    nuts_sampler=nuts_sampler, progressbar=False)
+            exact = _held_out_log_likelihood(
+                fold, site, float(observations["stage_ft"].iloc[index]),
+                float(observations["discharge_cfs"].iloc[index]))
+        except Exception as exc:  # noqa: BLE001 - one bad fold must not sink the rest
+            log.warning("reloo fold %d (%s) failed: %s: %s", index, site,
+                        type(exc).__name__, exc)
+            continue
+        if not np.isfinite(exact).any():
+            # Every draw gave this measurement no flow. At a two-measurement site that
+            # is the usual outcome of dropping the lower point: the refit re-places the
+            # stage of zero flow against the one point left, above the held-out stage.
+            # The exact ELPD is then -inf, which is a true statement about the model
+            # and not a number to add into a total, so PSIS's estimate is left alone.
+            log.warning("reloo fold %d (%s, stage %.2f ft): every draw puts the stage "
+                        "of zero flow above it, so its exact density is zero; keeping "
+                        "the PSIS estimate for this measurement", index, site,
+                        float(observations["stage_ft"].iloc[index]))
+            continue
+        # log mean exp over draws: the exact leave-one-out predictive density
+        exact_elpd = float(logsumexp(exact) - np.log(exact.size))
+        entry = repaired[site]
+        columns = np.flatnonzero(sites == site)
+        within = int(np.flatnonzero(columns == index)[0])
+        approximate = _pointwise_elpd(scores[site], within)
+        entry["elpd_loo"] = float(entry["elpd_loo"]) - approximate + exact_elpd
+        # keep the pointwise terms summing to the total, so a second pass subtracts
+        # what is actually there rather than the estimate it already replaced
+        pointwise = list(entry["elpd_loo_i"])
+        pointwise[within] = exact_elpd
+        entry["elpd_loo_i"] = pointwise
+        entry["n_refits"] = int(entry.get("n_refits", 0)) + 1
+
+    for site, entry in repaired.items():
+        refits, flagged_here = entry.get("n_refits", 0), entry.get("n_flagged", 0)
+        if not refits:
+            continue
+        n = entry.get("n_obs") or 0
+        entry["elpd_per_obs"] = entry["elpd_loo"] / n if n else np.nan
+        remaining = flagged_here - refits
+        if remaining > 0:
+            # PSIS is still carrying some of this site's points, so the estimate is
+            # still not one to quote - a partial repair is not a repair
+            entry["note"] = (f"{refits} of {flagged_here} flagged measurement(s) "
+                             f"refitted exactly; {remaining} still approximate")
+        else:
+            # every point PSIS could not handle was refitted, so what made the
+            # estimate unusable is gone even though the original Pareto-k remain
+            entry["reliable"] = True
+            entry["note"] = (f"all {refits} flagged measurement(s) refitted exactly; "
+                             f"Pareto-k shown are the original PSIS values")
+    return repaired
+
+
+def _pointwise_elpd(entry: dict, position: int) -> float:
+    """The PSIS pointwise ELPD this site's `position`-th measurement contributed.
+
+    Recorded by :func:`..models.hierarchical._site_scores` when it slices the joint
+    score, so a repair can subtract exactly what it is replacing rather than an
+    average standing in for it.
+    """
+    values = entry.get("elpd_loo_i")
+    if values is None:
+        raise KeyError("elpd_loo_i is required to repair a single measurement")
+    return float(np.asarray(values, float).ravel()[position])
