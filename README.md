@@ -62,4 +62,7 @@ It prints a URL with a token, like `http://localhost:8888/lab?token=<long hex>`.
 models, cross-validation, saving a fit. Runs on public USGS data.
 [`examples/extras.ipynb`](examples/extras.ipynb) — datums, zero flow, diagnostics, the
 map, many sites at once. [`docs/`](docs/) — one page per module. `rating-curves --help`
-— the CLI. `settings.py` — every default.
+— the CLI. [`settings.py`](src/limnotech_rating_curves/settings.py) — every tunable
+value, listed with its default and each overridable from the environment as `LRC_` +
+its name; copy [`.env.example`](.env.example) to `.env` and see
+[`examples/settings_from_env.py`](examples/settings_from_env.py).

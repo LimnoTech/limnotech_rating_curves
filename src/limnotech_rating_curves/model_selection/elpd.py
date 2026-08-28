@@ -10,15 +10,6 @@ log = logging.getLogger(__name__)
 #: group carries one value per measurement.
 RATINGCURVE_OBSERVED_VAR = "model_q"
 
-#: Pareto-k above this means PSIS-LOO is unreliable at that observation.
-PARETO_K_GOOD = settings.PARETO_K_GOOD
-
-#: Share of a group's observations whose Pareto-k may exceed ``PARETO_K_GOOD`` before
-#: :func:`elpd_by_group` marks that group's estimate unusable. The same threshold
-#: ``evaluate.logo`` applies to blocks, and for the same reason: a few bad points out
-#: of many is tolerable, a quarter of them is not a number to quote.
-MAX_PCT_K_HIGH = 5.0
-
 #: The Bayesian comparison fields, in table order.
 BAYES_FIELDS = ("elpd_loo", "se_loo", "p_loo", "elpd_waic", "p_waic",
                 "pareto_k_max", "pct_k_high", "n_obs")
@@ -58,7 +49,7 @@ def refused_for_advi(fit) -> "dict | None":
 
     Parameters
     ----------
-    fit : FitResult
+    fit : Fit
         A completed fit, whose ``config['method']`` records how it was fitted.
 
     Returns
@@ -130,7 +121,7 @@ def _summarize(loo, waic, log_offset: float = 0.0) -> dict:
         "elpd_waic": float(waic.elpd_waic) + n * log_offset,
         "p_waic": float(waic.p_waic),
         "pareto_k_max": float(np.nanmax(pareto_k)) if pareto_k.size else np.nan,
-        "pct_k_high": (float(100 * np.mean(pareto_k > PARETO_K_GOOD))
+        "pct_k_high": (float(100 * np.mean(pareto_k > settings.PARETO_K_GOOD))
                        if pareto_k.size else np.nan),
         "n_obs": n,
         "pareto_k": pareto_k.tolist(),
@@ -318,7 +309,7 @@ def elpd_by_group(idata, groups, log_offset: float = 0.0,
         elpd_waic = float(waic_i[columns].sum())
         lppd = float(lppd_i[columns].sum())
         k = pareto_k[columns]
-        pct_high = float(100 * np.mean(k > PARETO_K_GOOD)) if n else np.nan
+        pct_high = float(100 * np.mean(k > settings.PARETO_K_GOOD)) if n else np.nan
         # the standard error of a sum of n pointwise terms, as ArviZ computes it
         se_loo = float(np.sqrt(n) * np.std(loo_i[columns])) if n > 1 else np.nan
         scores[label] = {
@@ -333,17 +324,17 @@ def elpd_by_group(idata, groups, log_offset: float = 0.0,
             "pareto_k": k.tolist(),
             # the per-measurement terms this group's elpd_loo is the sum of. Kept so a
             # reloo repair can subtract exactly the point it replaces rather than an
-            # average standing in for it - see evaluate.exact_loo.refine_hierarchical.
+            # average standing in for it - see model_selection.exact_loo.refine_hierarchical.
             "elpd_loo_i": (loo_i[columns] + log_offset).tolist(),
             "elpd_per_obs": (elpd_loo + n * log_offset) / n if n else np.nan,
             "reliable": bool(n and np.isfinite(pct_high)
-                             and pct_high <= MAX_PCT_K_HIGH),
+                             and pct_high <= settings.PARETO_MAX_PCT_K_HIGH),
             "note": "",
         }
         if not scores[label]["reliable"] and np.isfinite(pct_high):
             scores[label]["note"] = (
                 f"PSIS unreliable: {pct_high:.0f}% of measurements above "
-                f"k={PARETO_K_GOOD}")
+                f"k={settings.PARETO_K_GOOD}")
     return scores
 
 
@@ -357,7 +348,7 @@ def pointwise_log_likelihood(fit):
 
     Parameters
     ----------
-    fit : FitResult
+    fit : Fit
         A completed fit.
 
     Returns
@@ -403,7 +394,7 @@ def pareto_k_per_point(fit) -> np.ndarray:
 
     Parameters
     ----------
-    fit : FitResult
+    fit : Fit
         A fit whose ``bayes`` scores have been computed.
 
     Returns
@@ -503,7 +494,7 @@ def comparison_rows(site) -> list:
 
 
 #: What each column of a comparison table means, for a notebook, a report, or a
-#: tooltip. :func:`limnotech_rating_curves.view.mapview.build_map` wires these onto the
+#: tooltip. :func:`limnotech_rating_curves.export.mapview.build_map` wires these onto the
 #: score table's column headers, so a reader can find out what a column is without
 #: leaving the map.
 METRIC_GLOSSARY = {
@@ -525,9 +516,9 @@ METRIC_GLOSSARY = {
               "resolvable",
     "p_loo": "effective number of parameters implied by LOO. Far above the model's "
              "real parameter count signals misfit or an over-influential point",
-    "elpd_waic": "the same predictive score by WAIC, as a cross-check on elpd_loo",
     "p_waic": "effective parameter count implied by WAIC",
-    "pareto_k_max": f"worst per-measurement Pareto-k. Above {PARETO_K_GOOD} the LOO "
+    "pareto_k_max": f"worst per-measurement Pareto-k. Above "
+                    f"{settings.PARETO_K_GOOD} the LOO "
                     f"estimate is unreliable, because one measurement dominates it",
     "pct_k_high": "percent of measurements whose Pareto-k is above the threshold",
     "n_obs": "measurements the ELPD was computed over",

@@ -62,17 +62,3 @@ without those points and score them exactly.
 | `posterior_summary(fit_or_model)` | ArviZ posterior summary |
 | `plot_convergence`, `plot_effective_sample_size`, `plot_trace`, `plot_pareto_k` | The diagnostic figures |
 
-## `logo.py` — leave-one-group-out, when observations are not independent
-
-PSIS-LOO drops one observation; on a 15-minute record its neighbours stay in the
-training set, so the score is optimistic. Dropping a whole block fixes that, using the
-same PSIS estimator on a grouped log-likelihood. Read `reliable` first: on a
-continuous record PSIS often fails at the block length the data actually needs.
-
-| Name | Purpose |
-| --- | --- |
-| `elpd_logo(log_likelihood, groups)` | Grouped PSIS ELPD, with `reliable`, `elpd_per_obs`, per-group `pareto_k` |
-| `group_log_likelihood(log_likelihood, groups)` | Sum the pointwise log-likelihood within each group |
-| `time_blocks(time, block="6h")` | One group per time block |
-| `stage_bands(stage, n_bands=12)` | One group per equal-width stage band |
-| `residual_correlation_length(time, residual)` | Evidence for the block length, rather than an assertion |

@@ -6,9 +6,8 @@ import pandas as pd
 from .. import settings
 from ..core import Sample
 from ..models import bdrc, ratingcurve
-from ..models.bdrc.defaults import CFS_TO_CMS, FT_TO_M
 from ..models.bdrc.posterior import normal_logpdf
-from . import metrics as metrics_module
+from . import elpd as metrics_module
 
 log = logging.getLogger(__name__)
 
@@ -98,7 +97,7 @@ def _psis_pointwise(fit, rating=None):
 
     Parameters
     ----------
-    fit : FitResult
+    fit : Fit
     rating : BayesianRating, optional
         The live ratingcurve model, for that family.
 
@@ -223,8 +222,9 @@ class BdrcRefitWrapper(_RefitWrapper):
         """
         import xarray as xr
 
-        stage_m = float(excluded_obs["stage_ft"].iloc[0]) * FT_TO_M
-        discharge_cms = float(excluded_obs["discharge_cfs"].iloc[0]) * CFS_TO_CMS
+        stage_m = float(excluded_obs["stage_ft"].iloc[0]) * settings.FEET_TO_METERS
+        discharge_cms = (float(excluded_obs["discharge_cfs"].iloc[0])
+                         * settings.CFS_TO_CMS)
         return xr.DataArray(holdout_log_likelihood(idata__i, stage_m, discharge_cms))
 
 
@@ -397,7 +397,7 @@ def reloo(rating, *, k_threshold: float = None, fraction: float = None,
     Examples
     --------
     >>> rating = lrc.fit_rating(measurements, model="bdrc_gplm0")   # doctest: +SKIP
-    >>> refined = lrc.evaluate.reloo(rating)                         # doctest: +SKIP
+    >>> refined = lrc.model_selection.reloo(rating)                         # doctest: +SKIP
     >>> refined["elpd_loo"], refined["elpd_loo_psis"], refined["n_refits"]
     """
     fit = rating.result
@@ -417,12 +417,12 @@ def refine(fit, sample, entry, *, fit_arguments: dict = None,
     """Repair a fit's ``elpd_loo`` by refitting its flagged measurements.
 
     The work behind :func:`reloo`, taking the pieces rather than a
-    :class:`~limnotech_rating_curves.ratings.RatingModel`, so the batch report can
+    :class:`~limnotech_rating_curves.ratings.RatingModel`, so a multi-site report can
     call it with the fits and samples it already holds.
 
     Parameters
     ----------
-    fit : FitResult
+    fit : Fit
         A completed fit whose ``bayes`` scores have been computed.
     sample : Sample or pandas.DataFrame
         The measurements it was fitted to, in the order it saw them.
@@ -689,8 +689,14 @@ def refine_hierarchical(scores: dict, idata, observations, model, *,
         index = int(position)
         site = str(sites[index])
         kept = observations.drop(observations.index[index])
-        rebuilt = {name: Sample.of(rows, site_id=name, source="reloo")
-                   for name, rows in kept.groupby("site", sort=False)}
+        # split the site key back into the halves it was built from, so each
+        # rebuilt sample derives the same sample_id it was grouped under
+        rebuilt = []
+        for name, rows in kept.groupby("site", sort=False):
+            source, colon, site_id = str(name).rpartition(":")
+            if not colon:
+                source, site_id = "", str(name)
+            rebuilt.append(Sample.of(rows, site_id=site_id, source=source))
         try:
             fold = fit_hierarchical(rebuilt, reference=False, seed=seed + 1 + index,
                                     nuts_sampler=nuts_sampler, progressbar=False)

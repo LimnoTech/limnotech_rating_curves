@@ -5,26 +5,9 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import PchipInterpolator
 
+from .. import settings
+
 log = logging.getLogger(__name__)
-
-#: Rolling-median window (in measurements) used to smooth the h(Q) curve, on samples
-#: large enough to smooth.
-DEFAULT_SMOOTH_WINDOW = 5
-
-#: Below this many distinct measurements, smoothing is switched off.
-#:
-#: Smoothing exists to suppress *measurement noise*, and it needs enough points
-#: either side of each one to have noise to average out. On a short record a
-#: five-point median instead averages across genuine curvature - on eight points it
-#: reaches a third of the way across the whole rating - and the flattening it
-#: introduces biases the solved offset far more than the noise it removes. So on a
-#: short record the raw points are the better estimate of the curve, and
-#: :func:`gage_height_of_discharge` reads from them directly.
-MIN_POINTS_TO_SMOOTH = 15
-
-#: When Johnson's method cannot be solved, zero flow is placed this fraction of
-#: the observed stage range below the lowest measurement.
-FALLBACK_PAD_FRACTION = 0.10
 
 
 @dataclass
@@ -86,7 +69,8 @@ def gage_height_of_discharge(stage, discharge, smooth_window=None):
     smooth_window : int, optional
         Width of the centered rolling median applied to stage after sorting by
         discharge. ``None`` (the default) chooses by sample size: a
-        ``DEFAULT_SMOOTH_WINDOW``-point median at ``MIN_POINTS_TO_SMOOTH``
+        ``settings.ZERO_FLOW_SMOOTH_WINDOW``-point median at
+        ``settings.ZERO_FLOW_MIN_POINTS_TO_SMOOTH``
         measurements or more, and no smoothing below that, where a median window
         would flatten real curvature rather than remove noise. Pass 1 or 0 to force
         smoothing off, or a number to force it on.
@@ -124,7 +108,8 @@ def gage_height_of_discharge(stage, discharge, smooth_window=None):
         raise ValueError(f"Johnson's method needs at least 3 distinct positive "
                          f"(stage, discharge) pairs, got {len(pairs)}")
     if smooth_window is None:
-        smooth_window = (DEFAULT_SMOOTH_WINDOW if len(pairs) >= MIN_POINTS_TO_SMOOTH
+        smooth_window = (settings.ZERO_FLOW_SMOOTH_WINDOW
+                         if len(pairs) >= settings.ZERO_FLOW_MIN_POINTS_TO_SMOOTH
                          else 1)
     if smooth_window and smooth_window > 1:
         smoothed = pairs["stage_ft"].rolling(smooth_window, center=True).median()
@@ -199,7 +184,8 @@ def johnson_offset(data, discharge=None, *, discharge_low=None, discharge_high=N
     on_error : {'fallback', 'raise'}, optional
         What to do when the method cannot be solved on this data. The default
         ``"fallback"`` returns a ``method="below_lowest"`` estimate, placing zero
-        flow ``FALLBACK_PAD_FRACTION`` of the stage range below the lowest
+        flow ``settings.ZERO_FLOW_FALLBACK_PAD_FRACTION`` of the stage range below
+        the lowest
         measurement, with the reason in ``note``. ``"raise"`` re-raises instead.
 
     Returns
@@ -275,7 +261,8 @@ def _below_lowest(sample, exc) -> ZeroFlowEstimate:
     """The fallback: zero flow placed a little below the lowest measurement."""
     low, high = sample.stage_range
     span = (high - low) or 1.0
-    fallback = float(low - FALLBACK_PAD_FRACTION * span)
+    pad = settings.ZERO_FLOW_FALLBACK_PAD_FRACTION
+    fallback = float(low - pad * span)
     log.debug("Johnson's method unavailable (%s); placing zero flow at %.4f ft",
               exc, fallback)
     return ZeroFlowEstimate(
@@ -283,7 +270,7 @@ def _below_lowest(sample, exc) -> ZeroFlowEstimate:
         r2_log_raw=loglog_r2(sample.stage_ft, sample.discharge_cfs, 0.0),
         r2_log_offset=loglog_r2(sample.stage_ft, sample.discharge_cfs, fallback),
         note=(f"Johnson's method unavailable ({type(exc).__name__}: {exc}); "
-              f"placed zero flow {FALLBACK_PAD_FRACTION:.0%} of the stage range "
+              f"placed zero flow {pad:.0%} of the stage range "
               f"below the lowest measurement"))
 
 

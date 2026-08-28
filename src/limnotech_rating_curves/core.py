@@ -108,9 +108,21 @@ class Sample:
         Discharge (cubic feet per second), same length as `stage_ft`.
     site_id : str
         The site these measurements came from (a USGS gage number, a station
-        name), or ``""`` for data you assembled yourself.
+        name), or ``""`` for data you assembled yourself. It titles a plot and
+        names an export file, so it stays the bare place - the key a run over many sites
+        files this sample under is :attr:`SiteRating.sample_id`, which qualifies
+        the place with the construction that produced it.
     source : str
         Which construction produced the sample, for grouping in reports.
+    sample_id : str
+        This sample's key: ``"<source>:<site>"``, derived from `site_id` and `source`
+        at construction. Not passed in - there is one way to set it.
+
+        A rating pairs a stage record with a discharge record, and `site_id` names
+        only the stage instrument. Sensor SBR-01 feeds two ratings - its stage
+        against MAGL flow-sheet discharge, and the same stage against USGS field
+        gagings - and both carry ``site_id="SBR-01_WL"``. `source` is the other half,
+        so together they name the rating: ``"magl:SBR-01"``, ``"colocated:SBR-01"``.
     stage_label : str
         Human description of the stage axis, e.g. ``"USGS gage height (ft)"`` or
         ``"water-surface elevation (NAVD88 ft)"``. This is what a plot's x-axis is
@@ -137,6 +149,7 @@ class Sample:
     discharge_cfs: np.ndarray
     site_id: str = ""
     source: str = ""
+    sample_id: str = field(init=False, default="")
     stage_label: str = "stage (ft)"
     datum_note: str = ""
     datum_reference_ft: float = 0.0
@@ -144,6 +157,8 @@ class Sample:
     skipped: str = ""
 
     def __post_init__(self):
+        site = self.site_id.removesuffix("_WL")
+        self.sample_id = f"{self.source}:{site}" if site and self.source else site
         self.stage_ft = np.asarray(self.stage_ft, float).ravel()
         self.discharge_cfs = np.asarray(self.discharge_cfs, float).ravel()
         if self.stage_ft.size != self.discharge_cfs.size:
@@ -316,14 +331,14 @@ class Sample:
         return frame
 
     @property
-    def stage_range(self) -> tuple:
+    def stage_range(self) -> tuple[float, float]:
         """``(lowest, highest)`` observed stage in feet, or ``(nan, nan)`` if empty."""
         if not len(self):
             return (float("nan"), float("nan"))
         return (float(np.nanmin(self.stage_ft)), float(np.nanmax(self.stage_ft)))
 
     @property
-    def discharge_range(self) -> tuple:
+    def discharge_range(self) -> tuple[float, float]:
         """``(lowest, highest)`` observed discharge in cfs, or ``(nan, nan)``."""
         if not len(self):
             return (float("nan"), float("nan"))
@@ -464,7 +479,7 @@ class Sample:
         -------
         CrossValidation
         """
-        from .evaluate import crossval
+        from .model_selection import crossval
         return crossval.cross_validate(self, **kwargs)
 
     def plot_record(self, station, *, variable: str = "stage", pad_fraction=None,
@@ -498,7 +513,7 @@ class Sample:
             The two axes, record above and discharge below.
         """
         from .data import datum, pagaia, pagaia_corrections
-        from .view import plots
+        from .export import plots
         start, end = self.time_range(pad_fraction)
         # Fetch, correct the units, convert - see
         # limnotech_rating_curves.data.pagaia_corrections.
@@ -511,149 +526,8 @@ class Sample:
 
 
 @dataclass
-class Metrics:
-    """How well one fitted rating matches its measurements.
-
-    The first block is ordinary in-sample goodness of fit; the second is Bayesian
-    model comparison, where higher `elpd_loo` is better. NaN means the score was
-    not available (a fit whose posterior was not kept, a reference curve with no
-    posterior at all).
-
-    Attributes
-    ----------
-    n : int
-        Measurements the scores were computed over.
-    nse : float
-        Nash-Sutcliffe efficiency on discharge. 1 is perfect; 0 means the fit is
-        no better than the mean observed discharge.
-    rmse : float
-        Root-mean-square error in cfs. In the units of the data, so it is
-        dominated by the high-flow end.
-    r2_log : float
-        R-squared computed on log discharge. This is the one to read for a
-        rating: it weighs a factor-of-two error at low flow the same as at high
-        flow, which is how rating error is normally judged.
-    elpd_loo : float
-        Expected log pointwise predictive density, estimated by PSIS-LOO - an
-        estimate of how well the model would predict a measurement it had not
-        seen. Higher is better. Comparable across every model in this package
-        because they are all put in the same observation space (see
-        :mod:`limnotech_rating_curves.evaluate.metrics`).
-    se_loo : float
-        Standard error of `elpd_loo`. Two models whose ELPD differ by less than
-        about two of these are not distinguishable by this sample.
-    p_loo : float
-        Effective number of parameters implied by LOO. Much larger than the
-        model's actual parameter count is a sign of misfit or of an influential
-        observation.
-    elpd_waic : float
-        The same quantity estimated by WAIC, as a cross-check on `elpd_loo`.
-    pareto_k_max : float
-        Worst per-observation Pareto-k from the PSIS-LOO importance sampling.
-        Above ``settings.PARETO_K_GOOD`` (0.7) the LOO estimate is unreliable for
-        that point, which in practice means one measurement dominates the fit.
-    """
-
-    n: int
-    nse: float
-    rmse: float
-    r2_log: float
-    elpd_loo: float = float("nan")
-    se_loo: float = float("nan")
-    p_loo: float = float("nan")
-    elpd_waic: float = float("nan")
-    pareto_k_max: float = float("nan")
-
-    @classmethod
-    def from_fit(cls, fit: "FitResult") -> "Metrics":
-        """Assemble the scores recorded on a :class:`FitResult`.
-
-        Parameters
-        ----------
-        fit : FitResult
-            A completed fit. Its ``metrics`` dict supplies the in-sample block
-            and its ``bayes`` dict the model-comparison block; missing entries
-            become NaN.
-
-        Returns
-        -------
-        Metrics
-        """
-        in_sample = fit.metrics or {}
-        bayes = fit.bayes or {}
-        nan = float("nan")
-        return cls(
-            n=int(in_sample.get("n", 0)),
-            nse=in_sample.get("nse", nan), rmse=in_sample.get("rmse", nan),
-            r2_log=in_sample.get("r2_log", nan),
-            elpd_loo=bayes.get("elpd_loo", nan), se_loo=bayes.get("se_loo", nan),
-            p_loo=bayes.get("p_loo", nan), elpd_waic=bayes.get("elpd_waic", nan),
-            pareto_k_max=bayes.get("pareto_k_max", nan))
-
-    def to_dict(self) -> dict:
-        """The scores as a plain dict, in table order."""
-        return {"n": self.n, "nse": self.nse, "rmse": self.rmse,
-                "r2_log": self.r2_log,
-                "elpd_loo": self.elpd_loo, "se_loo": self.se_loo,
-                "p_loo": self.p_loo, "elpd_waic": self.elpd_waic,
-                "pareto_k_max": self.pareto_k_max}
-
-    def __repr__(self) -> str:
-        return (f"Metrics(n={self.n}, nse={self.nse:.3f}, rmse={self.rmse:.3g}, "
-                f"r2_log={self.r2_log:.3f}, elpd_loo={self.elpd_loo:.1f})")
-
-
-def fit_metrics(observed, predicted) -> dict:
-    """In-sample goodness of fit for paired observed and predicted discharge.
-
-    Parameters
-    ----------
-    observed, predicted : array-like
-        Discharge in cfs, same length. Pairs where either value is not finite are
-        dropped before scoring, and `n` reports how many survived.
-
-    Returns
-    -------
-    dict
-        ``rmse``, ``nse``, ``r2_log``, ``n`` - see
-        :class:`Metrics` for what each means. NSE is NaN when the observations
-        have no variance (nothing to explain), and ``r2_log`` is NaN when fewer
-        than two pairs are positive.
-    """
-    observed = np.asarray(observed, float)
-    predicted = np.asarray(predicted, float)
-    usable = np.isfinite(observed) & np.isfinite(predicted)
-    observed, predicted = observed[usable], predicted[usable]
-    if observed.size == 0:
-        return {"rmse": np.nan, "nse": np.nan, "r2_log": np.nan, "n": 0}
-
-    residual = predicted - observed
-    rmse = float(np.sqrt(np.mean(residual ** 2)))
-    variance = float(np.sum((observed - observed.mean()) ** 2))
-    nse = float(1 - np.sum(residual ** 2) / variance) if variance > 0 else np.nan
-
-    positive = (observed > 0) & (predicted > 0)
-    if positive.sum() >= 2:
-        log_observed = np.log(observed[positive])
-        log_predicted = np.log(predicted[positive])
-        residual_sum = float(np.sum((log_observed - log_predicted) ** 2))
-        total_sum = float(np.sum((log_observed - log_observed.mean()) ** 2))
-        r2_log = float(1 - residual_sum / total_sum) if total_sum > 0 else np.nan
-    else:
-        r2_log = np.nan
-
-    return {"rmse": rmse, "nse": nse, "r2_log": r2_log,
-            "n": int(observed.size)}
-
-
-@dataclass
-class FitResult:
-    """One model fitted to one sample - the record every backend produces.
-
-    This is the uniform shape the two model families are reduced to, so nothing
-    downstream needs to know which package did the fitting. A model that could
-    not be fitted is recorded here with ``status`` ``"skipped"`` or ``"failed"``
-    and a reason, rather than being dropped silently.
+class Fit:
+    """One model fitted to one sample
 
     Attributes
     ----------
@@ -673,7 +547,7 @@ class FitResult:
     config : dict
         The model configuration actually used (segments, knots, sampler).
     metrics : dict
-        In-sample scores, from :func:`fit_metrics`.
+        In-sample scores, from :func:`~limnotech_rating_curves.model_selection.metrics.fit_metrics`.
     curve : pandas.DataFrame or None
         The fitted rating: ``stage_ft``, ``discharge_cfs`` (posterior mean),
         ``discharge_median_cfs``, ``lower``, ``upper``.
@@ -685,7 +559,7 @@ class FitResult:
         exactly rather than interpolating its curve.
     bayes : dict
         Bayesian comparison scores, filled in on first request (see
-        :mod:`limnotech_rating_curves.evaluate.metrics`).
+        :mod:`limnotech_rating_curves.model_selection.elpd`).
     log_likelihood : numpy.ndarray or None
         Pointwise log-likelihood, shape ``(draws, observations)``, in raw
         log-discharge space. Produced by the bdrc family at fit time; the
@@ -743,7 +617,7 @@ class FoldCurve:
     test_stage, test_discharge : list of float
         The measurements held out from it.
     test_metrics : dict
-        Held-out scores, from :func:`fit_metrics`.
+        Held-out scores, from :func:`~limnotech_rating_curves.model_selection.metrics.fit_metrics`.
     """
 
     model_key: str
@@ -829,12 +703,12 @@ class ExternalCurve:
         supplies an interval. Most do not: a typed spreadsheet equation is a bare
         line and drawing a band around it would be an invention.
     metrics : dict
-        How it scores on the site's own measurements, from :func:`fit_metrics`, so it
+        How it scores on the site's own measurements, from :func:`~limnotech_rating_curves.model_selection.metrics.fit_metrics`, so it
         lands in the comparison table on the same footing as a fit.
     color : str
         Hex color it is drawn in. Empty means "use the style this ``kind`` is drawn
         with everywhere", which is the normal case - see
-        :data:`limnotech_rating_curves.view.mapview.EXTERNAL_STYLE`.
+        ``settings.MAP_EXTERNAL_STYLE``.
     dash : str
         Plotly line style it is drawn with. Empty means the same.
     detail : dict
@@ -854,87 +728,3 @@ class ExternalCurve:
     def __repr__(self):
         nse = self.metrics.get("nse", float("nan"))
         return f"ExternalCurve({self.key}, kind={self.kind!r}, nse={nse:.3f})"
-
-
-@dataclass
-class SiteRating:
-    """Every model fitted at one monitoring site, plus where the site is.
-
-    This is what a batch run produces per site and what the map draws.
-
-    Attributes
-    ----------
-    sample_id : str
-        Unique identifier for this site-and-source combination, e.g.
-        ``"usgs:04176356"``.
-    source : str
-        Which sample construction it came from.
-    label : str
-        Human name for the site.
-    sample : Sample
-        The measurements.
-    fits : list of FitResult
-        One entry per model attempted, successful or not.
-    reference : dict or None
-        The **USGS published rating** to compare against, as
-        ``{"label", "curve", "metrics"}``. Only USGS gages have one, and nothing else
-        belongs here - a curve that is not a published agency rating must not be typed
-        as one. See :attr:`extra_curves`.
-    extra_curves : list of ExternalCurve
-        Any other curve this package did not fit: a field spreadsheet's typed
-        equation, a curve from a previous study. Each carries its own ``kind``, so the
-        results table and the map can say what sort of thing it is.
-    coords : tuple or None
-        ``(latitude, longitude)``, for the map.
-    group : str or None
-        Optional grouping label (for MAGL, the cluster).
-    station : str or None
-        The sensor / station name, where one applies.
-    gage : str or None
-        The USGS gage number, where one applies.
-    """
-
-    sample_id: str
-    source: str
-    label: str
-    sample: Sample
-    fits: list = field(default_factory=list)
-    reference: dict | None = None
-    extra_curves: list = field(default_factory=list)
-    coords: tuple | None = None
-    group: str | None = None
-    station: str | None = None
-    gage: str | None = None
-
-    @property
-    def stage_label(self) -> str:
-        """The sample's stage-axis description."""
-        return self.sample.stage_label
-
-    @property
-    def successful_fits(self) -> list:
-        """Only the fits that succeeded."""
-        return [fit for fit in self.fits if fit.ok]
-
-    def external_curves(self) -> list:
-        """Every curve at this site that this package did not fit, in one list.
-
-        The USGS published rating (if any) first, then :attr:`extra_curves`. Callers
-        that draw or score "everything that is not a fit" go through here so the
-        published rating and a spreadsheet equation are handled by one code path
-        while keeping their different ``kind``.
-
-        Returns
-        -------
-        list of ExternalCurve
-        """
-        curves = []
-        if self.reference:
-            curves.append(ExternalCurve(
-                key="published_reference", label=self.reference["label"],
-                kind="published_reference", curve=self.reference["curve"],
-                metrics=self.reference.get("metrics", {}),
-                detail={"source": "USGS published rating",
-                        "gage": self.gage or ""}))
-        curves.extend(self.extra_curves)
-        return curves

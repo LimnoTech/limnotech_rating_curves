@@ -42,7 +42,7 @@ dataset rather than recompiled.
 
 | Module | Contents |
 | --- | --- |
-| `defaults.py` | `theta_names`, `varying_exponent`, `varying_variance`, `prior_covariance`, and the sampler constants `NUM_DRAWS`, `NUM_TUNE`, `NUM_CHAINS`, `ADVI_STEPS`, `NUTS_SAMPLER`, `TARGET_ACCEPT`, `SEED`, `FT_TO_M`, `CFS_TO_CMS` |
+| `defaults.py` | `MODELS`, `theta_names`, `varying_exponent`, `varying_variance`, `prior_covariance`, `target_accept_for`. The numbers themselves - sampler budgets, priors, the spline basis size - are `settings.BDRC_*`, imported here under the short names the paper uses |
 | `design.py` | `components(model, y_obs, stage, ...)` → `Components`; `b_splines`, `unique_stage_matrix`, `prediction_stages`, `matern52_correlation`, `distance_matrix` |
 | `graphs.py` | `SharedDataset` (the shared variables a graph binds to), `marginal_logp_graph`, `design_graph`, `log_prior_graph` |
 | `sampling.py` | `sample_hyperparameters(compiled, method=...)` — NUTS or ADVI |

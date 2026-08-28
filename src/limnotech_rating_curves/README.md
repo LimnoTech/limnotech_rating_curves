@@ -22,7 +22,6 @@ ratings.best.plot()
 | [`models/bdrc/`](models/bdrc/) | The bdrc generalized power law, ported from R |
 | [`evaluate/`](evaluate/) | Cross-validation, exact leave-one-out, convergence diagnostics |
 | [`view/`](view/) | Matplotlib figures and the interactive Plotly map |
-| [`workflows/`](workflows/) | Many sites at once: parallel sweeps and the batch report |
 | [`support/`](support/) | Disk cache and logging setup |
 
 ## Top-level modules
@@ -67,15 +66,19 @@ ratings.best.plot()
 **`cli.py` / `__main__.py`** — the `rating-curves` command (`fit`, `export`,
 `inspect`/`show`, `list`). `main(argv=None)` is the entry point.
 
-**`settings.py`** — every default in one place: paths, seed, grid size, sampler
-settings. `apply_numerical_workarounds()` runs at import to set the environment
-variables PyMC and MKL need before numpy loads.
+**`settings.py`** — every tunable value in the package, in one place: paths, seed,
+sampler budgets, priors, tolerances, service endpoints, figure and map geometry. Each
+one is read from `os.environ` at import as `LRC_` + its name, so a `.env` loaded
+before the package is imported configures all of it. This file is the reference
+listing; `.env.example` is the starting point and `examples/settings_from_env.py`
+shows the loading. `apply_numerical_workarounds()` also runs at import, to set the
+environment variables PyMC and MKL need before numpy loads.
 
 ## Re-exported at the top level
 
 Everything most callers need is on `lrc` directly: `fit_rating`, `compare`, `fit`,
-`rating_model`, the five estimator classes, `RatingSet`, `fit_many`,
-`RatingCollection`, `report`, `Sample`, `Metrics`, `FitResult`, `FoldCurve`,
+`rating_model`, the five estimator classes, `RatingSet`, `report`, `Sample`,
+`Metrics`, `FitResult`, `FoldCurve`,
 `SiteRating`, `ExternalCurve`, `gage_sample`, `station_sample`, `sensor_sample`,
 `published_rating`, `rating_curve_sheet`, `flow_sheet_sample`, `StageDatum`,
 `to_gage_height`, `distance_to_stage`, `johnson_offset`, `estimate_zero_flow`,

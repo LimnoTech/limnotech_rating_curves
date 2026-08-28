@@ -37,66 +37,28 @@ Usage::
 
 from __future__ import annotations
 
+import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import arviz as az
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import pymc as pm
 import pytensor.tensor as pt
 
 from .. import settings
-from ..core import FitResult, Sample, fit_metrics, padded_stage_grid
-from ..evaluate import metrics as metrics_module
+from ..core import Fit, Sample, padded_stage_grid
+from ..model_selection.metrics import fit_metrics
+from ..model_selection import elpd as metrics_module
 from .ratingcurve import POWER_LAW_FORM, breakpoint_prior
-
-#: Discharge that ``sigma_i`` refers to (cfs). Scatter grows as flow falls, so sigma is
-#: only comparable between sites when quoted at a common discharge; 1 cfs sits in the
-#: range these sensors work in.
-REFERENCE_DISCHARGE_CFS = 1.0
-
-#: Centre and width of the per-site exponent prior, and the range outside which no
-#: channel produces an exponent. Manning with width proportional to ``depth ** m``
-#: gives ``m + 5/3``: 1.67 for a rectangular section, 2.17 parabolic, 2.67 for a V.
-EXPONENT_PRIOR = (2.0, 0.6)
-EXPONENT_BOUNDS = (1.0, 4.0)
-
-#: Prior scales for the population of site scatters, and for the flow dependence of
-#: scatter. Loose - these are the quantities being estimated.
-SIGMA_MEAN_PRIOR_SCALE = 1.0
-SIGMA_SPREAD_PRIOR_SCALE = 0.5
-GAMMA_PRIOR_SCALE = 0.5
-
-#: Percentiles of the fitted discharges that bound where the flow dependence of scatter
-#: applies. ``gamma`` is the slope of log scatter on log discharge, estimated from the
-#: residuals of the sites in the fit, so it is only supported over the discharges those
-#: residuals cover. Held at its edge value outside, rather than extrapolated: a straight
-#: line in log space grows without bound as discharge falls, and nothing measured says
-#: it should. Taken from the data in each fit, never fixed.
-GAMMA_SUPPORT_PERCENTILES = (5.0, 95.0)
-
-#: Fewest measurements at which a site's own zero flow is estimated rather than held at
-#: its prior centre. Below this the site has no stage range to place it with.
-SAMPLE_ZERO_FLOW_FROM = 3
-
-#: Bounds on the log-depth prior spread, and the fallback when a site has too few
-#: measurements for ``breakpoint_prior`` to place a breakpoint at all.
-LOG_DEPTH_SPREAD_BOUNDS = (0.1, 1.0)
-FALLBACK_LOG_DEPTH = (float(np.log(0.5)), 1.0)
-
-#: How far back USGS reference measurements are taken. A channel changes, so older
-#: measurements scatter about a different rating than today's.
-REFERENCE_YEARS = 5
-
-#: A fit is quotable only below these.
-MAX_DIVERGENCES = 0
-MAX_R_HAT = 1.01
 
 #: Group a site falls into when it belongs to no known cluster.
 UNGROUPED = "other"
 
 #: How a reference gage is keyed in the results, so it is recognisable as one.
-REFERENCE_PREFIX = "USGS-"
+
 
 #: The observed random variable in the joint model. Its log-likelihood group carries
 #: one column per measurement, across every site, which is what PSIS-LOO is scored on.
@@ -104,16 +66,6 @@ OBSERVED_VAR = "log_discharge"
 
 
 # --- assembling the sites ----------------------------------------------------
-
-
-def _as_mapping(samples) -> dict:
-    """Normalize a Sample, a list of them, or a mapping into ``{id: Sample}``."""
-    if isinstance(samples, Sample):
-        samples = [samples]
-    if isinstance(samples, dict):
-        return dict(samples)
-    return {sample.site_id or f"site_{position}": sample
-            for position, sample in enumerate(samples)}
 
 
 def _cluster_of(site_id: str) -> str:
@@ -125,8 +77,6 @@ def _cluster_of(site_id: str) -> str:
     from ..data import magl
 
     prefix, _, name = str(site_id).rpartition(":")
-    if name.startswith(REFERENCE_PREFIX):
-        prefix, name = "usgs_gage", name[len(REFERENCE_PREFIX):]
     lookup = (magl.gage_cluster if prefix == "usgs_gage" or name.isdigit()
               else magl.station_cluster)
     try:
@@ -136,7 +86,8 @@ def _cluster_of(site_id: str) -> str:
     return cluster or UNGROUPED
 
 
-def reference_samples(years: int = REFERENCE_YEARS, *, now=None) -> dict:
+def reference_samples(years: int = settings.HIER_REFERENCE_YEARS, *,
+                      now: pd.Timestamp | str | None = None) -> dict[str, Sample]:
     """The colocated USGS gages, as samples to fit alongside the sensors.
 
     They carry 26-48 measurements each against the sensors' one or two, so they are
@@ -152,7 +103,9 @@ def reference_samples(years: int = REFERENCE_YEARS, *, now=None) -> dict:
     Returns
     -------
     dict
-        ``{"USGS-<gage>": Sample}``, keyed so a reference is recognisable in results.
+        ``{"usgs_gage:<gage>": Sample}`` - each keyed by its own
+        :attr:`Sample.sample_id`, so a gage that was also requested directly is the
+        same site rather than a second one.
     """
     from ..data import magl, usgs
 
@@ -163,7 +116,7 @@ def reference_samples(years: int = REFERENCE_YEARS, *, now=None) -> dict:
         sample = usgs.gage_sample(gage, start=start.date().isoformat(),
                                   end=end.date().isoformat())
         if len(sample):
-            gages[f"{REFERENCE_PREFIX}{gage}"] = sample
+            gages[sample.sample_id] = sample
     return gages
 
 
@@ -173,7 +126,7 @@ def _usable(frame: pd.DataFrame) -> pd.DataFrame:
                  & (frame["discharge_cfs"] > 0)]
 
 
-def _observations(samples: dict) -> pd.DataFrame:
+def _observations(samples: dict[str, Sample]) -> pd.DataFrame:
     """One row per usable measurement, with its site and cluster.
 
     A row is dropped when stage or discharge is missing, or discharge is not strictly
@@ -211,9 +164,9 @@ def _zero_flow_priors(observations: pd.DataFrame, sites) -> tuple:
             depth = max(low - float(prior["mu"][0]), 1e-3)
             centre = float(np.log(depth))
             spread = float(np.clip(float(prior["sigma"][0]) / depth,
-                                   *LOG_DEPTH_SPREAD_BOUNDS))
+                                   *settings.HIER_LOG_DEPTH_SPREAD_BOUNDS))
         except Exception:  # noqa: BLE001 - too few measurements to place a breakpoint
-            centre, spread = FALLBACK_LOG_DEPTH
+            centre, spread = settings.HIER_FALLBACK_LOG_DEPTH
         centres.append(centre)
         spreads.append(spread)
         lowest.append(low)
@@ -246,11 +199,12 @@ def build_model(observations: pd.DataFrame) -> pm.Model:
 
     centres, spreads, lowest = _zero_flow_priors(observations, sites)
     counts = observations.groupby("site").size().reindex(sites).to_numpy()
-    estimates_zero_flow = np.where(counts >= SAMPLE_ZERO_FLOW_FROM)[0]
+    estimates_zero_flow = np.where(counts >= settings.HIER_SAMPLE_ZERO_FLOW_FROM)[0]
 
     stage = observations["stage_ft"].to_numpy(float)
     log_discharge = np.log(observations["discharge_cfs"].to_numpy(float))
-    support = tuple(np.percentile(log_discharge, GAMMA_SUPPORT_PERCENTILES))
+    support = tuple(np.percentile(log_discharge,
+                                  settings.HIER_GAMMA_SUPPORT_PERCENTILES))
 
     # Log depth is centred per site before it meets the exponent. Uncentred, level and
     # exponent are perfectly correlated at a site with one measurement and the sampler
@@ -258,6 +212,9 @@ def build_model(observations: pd.DataFrame) -> pm.Model:
     prior_depth = stage - lowest[site_of] + np.exp(centres[site_of])
     centring = (pd.Series(np.log(np.maximum(prior_depth, 1e-6)))
                 .groupby(site_of).transform("mean").to_numpy())
+
+    exponent_centre, exponent_width = settings.HIER_EXPONENT_PRIOR
+    exponent_low, exponent_high = settings.HIER_EXPONENT_BOUNDS
 
     coords = {"site": sites, "group": groups, "obs": np.arange(len(observations))}
     with pm.Model(coords=coords) as model:
@@ -274,19 +231,21 @@ def build_model(observations: pd.DataFrame) -> pm.Model:
                                      lowest - pm.math.exp(log_depth), dims="site")
 
         exponent = pm.TruncatedNormal(
-            "exponent", mu=EXPONENT_PRIOR[0], sigma=EXPONENT_PRIOR[1],
-            lower=EXPONENT_BOUNDS[0], upper=EXPONENT_BOUNDS[1], dims="site")
+            "exponent",
+            mu=exponent_centre, sigma=exponent_width,
+            lower=exponent_low, upper=exponent_high, dims="site")
 
         mu_sigma = pm.Normal("mu_sigma", mu=np.log(0.5),
-                             sigma=SIGMA_MEAN_PRIOR_SCALE, dims="group")
-        tau_sigma = pm.HalfNormal("tau_sigma", sigma=SIGMA_SPREAD_PRIOR_SCALE)
+                             sigma=settings.HIER_SIGMA_MEAN_PRIOR_SCALE, dims="group")
+        tau_sigma = pm.HalfNormal(
+            "tau_sigma", sigma=settings.HIER_SIGMA_SPREAD_PRIOR_SCALE)
         sigma_offset = pm.Normal("sigma_offset", 0.0, 1.0, dims="site")
         sigma = pm.Deterministic(
             "sigma",
             pm.math.exp(mu_sigma[group_of_site] + sigma_offset * tau_sigma),
             dims="site")
 
-        gamma = pm.HalfNormal("gamma", sigma=GAMMA_PRIOR_SCALE)
+        gamma = pm.HalfNormal("gamma", sigma=settings.HIER_GAMMA_PRIOR_SCALE)
 
         mean_log_discharge = (level[site_of] + exponent[site_of]
                               * (pm.math.log(stage - zero_flow[site_of]) - centring))
@@ -295,7 +254,7 @@ def build_model(observations: pd.DataFrame) -> pm.Model:
         # clipped to the discharges gamma was estimated over - see `support`.
         spread_of_observation = sigma[site_of] * pm.math.exp(
             -gamma * (pm.math.clip(mean_log_discharge, *support)
-                      - np.log(REFERENCE_DISCHARGE_CFS)))
+                      - np.log(settings.HIER_REFERENCE_DISCHARGE_CFS)))
 
         pm.Normal("log_discharge", mu=mean_log_discharge, sigma=spread_of_observation,
                   observed=log_discharge, dims="obs")
@@ -341,7 +300,7 @@ class SitePosterior:
     #: posterior enters either.
     DRAW_VARIABLES = ("level", "exponent", "zero_flow", "sigma", "gamma")
 
-    def save(self, path) -> str:
+    def save(self, path: str | os.PathLike[str]) -> str:
         """Write this site's draws to an ArviZ NetCDF file.
 
         One site's marginal posterior is a complete description of its rating. The
@@ -377,12 +336,12 @@ class SitePosterior:
             "centring": float(self.centring),
             "gamma_support_low": float(self.gamma_support[0]),
             "gamma_support_high": float(self.gamma_support[1]),
-            "reference_discharge_cfs": float(REFERENCE_DISCHARGE_CFS)})
+            "reference_discharge_cfs": float(settings.HIER_REFERENCE_DISCHARGE_CFS)})
         idata.to_netcdf(str(path))
         return str(path)
 
     @classmethod
-    def load(cls, path) -> "SitePosterior":
+    def load(cls, path: str | os.PathLike[str]) -> "SitePosterior":
         """Rebuild a site's posterior from a file :meth:`save` wrote.
 
         Raises
@@ -406,7 +365,7 @@ class SitePosterior:
                    gamma_support=(float(attrs["gamma_support_low"]),
                                   float(attrs["gamma_support_high"])))
 
-    def log_discharge(self, stage) -> np.ndarray:
+    def log_discharge(self, stage: npt.ArrayLike) -> np.ndarray:
         """Draws of log discharge at each stage, shaped ``(draws, stages)``."""
         stages = np.atleast_1d(np.asarray(stage, float))
         depth = stages[None, :] - self.zero_flow[:, None]
@@ -414,7 +373,7 @@ class SitePosterior:
             return (self.level[:, None]
                     + self.exponent[:, None] * (np.log(depth) - self.centring))
 
-    def scatter(self, stage) -> np.ndarray:
+    def scatter(self, stage: npt.ArrayLike) -> np.ndarray:
         """Draws of the scatter at each stage, shaped like :meth:`log_discharge`.
 
         Outside the discharges ``gamma`` was estimated over the scatter is held at its
@@ -423,9 +382,11 @@ class SitePosterior:
         drawn = np.clip(self.log_discharge(stage), *self.gamma_support)
         with np.errstate(invalid="ignore"):
             return self.sigma[:, None] * np.exp(
-                -self.gamma[:, None] * (drawn - np.log(REFERENCE_DISCHARGE_CFS)))
+                -self.gamma[:, None]
+                * (drawn - np.log(settings.HIER_REFERENCE_DISCHARGE_CFS)))
 
-    def posterior_predictive(self, stage, *, seed: int = None) -> np.ndarray:
+    def posterior_predictive(self, stage: npt.ArrayLike, *,
+                             seed: int | None = None) -> np.ndarray:
         """Posterior predictive draws of discharge (cfs), one per posterior draw.
 
         A draw of the rating plus a draw of the site's scatter about it - the range a
@@ -436,7 +397,7 @@ class SitePosterior:
         with np.errstate(invalid="ignore", over="ignore"):
             return np.exp(drawn + self.scatter(stage) * rng.standard_normal(drawn.shape))
 
-    def posterior_draws(self, stage) -> np.ndarray:
+    def posterior_draws(self, stage: npt.ArrayLike) -> np.ndarray:
         """Draws of the fitted rating (cfs), without gaging scatter.
 
         :meth:`posterior_predictive` adds a draw of the site's scatter to each of
@@ -445,7 +406,7 @@ class SitePosterior:
         with np.errstate(over="ignore"):
             return np.exp(self.log_discharge(stage))
 
-    def posterior_mean(self, stage) -> np.ndarray:
+    def posterior_mean(self, stage: npt.ArrayLike) -> np.ndarray:
         """Posterior-mean discharge (cfs), ``E[exp(mu)]``.
 
         The mean of :meth:`posterior_draws`. Averages over everything the fit leaves
@@ -458,7 +419,7 @@ class SitePosterior:
         """
         return np.nanmean(self.posterior_draws(stage), axis=0)
 
-    def predict(self, stage) -> np.ndarray:
+    def predict(self, stage: npt.ArrayLike) -> np.ndarray:
         """Posterior-mean discharge (cfs) at the given stage.
 
         :meth:`posterior_mean`. Evaluated from the parameters, so a stage above the
@@ -467,7 +428,7 @@ class SitePosterior:
         """
         return self.posterior_mean(stage)
 
-    def median(self, stage) -> np.ndarray:
+    def median(self, stage: npt.ArrayLike) -> np.ndarray:
         """Median discharge (cfs) at the given stage.
 
         Unaffected by the scatter: a symmetric error in log space leaves the median
@@ -476,7 +437,8 @@ class SitePosterior:
         """
         return np.exp(np.nanmedian(self.log_discharge(stage), axis=0))
 
-    def interval(self, stage, level: float = 0.95, *, predictive: bool = True) -> tuple:
+    def interval(self, stage: npt.ArrayLike, level: float = 0.95, *,
+                 predictive: bool = True) -> tuple[np.ndarray, np.ndarray]:
         """Lower and upper discharge at the given stage.
 
         Parameters
@@ -496,7 +458,7 @@ class SitePosterior:
             return (np.nanpercentile(drawn, tail, axis=0),
                     np.nanpercentile(drawn, 100 - tail, axis=0))
 
-    def table(self, stage) -> pd.DataFrame:
+    def table(self, stage: npt.ArrayLike) -> pd.DataFrame:
         """The rating at the given stages, in the columns every family reports.
 
         ``discharge_cfs`` is the rating, :meth:`posterior_mean`, and
@@ -524,7 +486,7 @@ class SitePosterior:
                              "discharge_predictive_median_cfs": self.median(stages),
                              "lower": lower, "upper": upper})
 
-    def equation(self) -> dict:
+    def equation(self) -> dict[str, object]:
         """Posterior-mean parameters, in the package's usual log-space form.
 
         Centring is folded into the intercept, so these describe
@@ -548,7 +510,7 @@ class HierarchicalFit:
     Attributes
     ----------
     results : dict
-        ``{site_id: FitResult}``, the shape every other model family returns.
+        ``{site_id: Fit}``, the shape every other model family returns.
     skipped : dict
         ``{site_id: reason}`` for requested sites that could not be fitted, so one
         never disappears silently.
@@ -571,8 +533,8 @@ class HierarchicalFit:
     @property
     def converged(self) -> bool:
         """Whether the fit is quotable: no divergences and R-hat within tolerance."""
-        return (self.divergences <= MAX_DIVERGENCES
-                and self.worst_r_hat <= MAX_R_HAT)
+        return (self.divergences <= settings.MAX_DIVERGENCES
+                and self.worst_r_hat <= settings.R_HAT_GOOD)
 
     def rating(self, site_id: str) -> "HierarchicalPowerLaw":
         """That site's rating, answering to the same names as :class:`ratings.PowerLaw`."""
@@ -583,22 +545,43 @@ class HierarchicalFit:
 
     def sigma(self) -> pd.DataFrame:
         """Every site's scatter, with its cluster and measurement count."""
-        rows = [{"site": key, "cluster": result.config.get("cluster"), "n": result.n,
-                 "sigma": result.config.get("sigma"),
-                 "population_sigma": result.config.get("mu_sigma")}
-                for key, result in self.results.items()]
+        rows = [{"site": key, "cluster": fit.config.get("cluster"), "n": fit.n,
+                 "sigma": fit.config.get("sigma"),
+                 "population_sigma": fit.config.get("mu_sigma")}
+                for key, fit in self.results.items()]
         return pd.DataFrame(rows).sort_values(["cluster", "n"], ascending=[True, False])
 
+    def scored(self) -> tuple[int, int]:
+        """How many sites got an ELPD, and how many of those Pareto-k distrusts.
+
+        Returns
+        -------
+        tuple of (int, int)
+            ``(scored, unreliable)``. A site is scored when PSIS-LOO produced a finite
+            ``elpd_loo``; it is unreliable when its Pareto-k says the importance
+            weights could not be trusted, which is what ``reloo`` is for.
+        """
+        scores = [fit.bayes or {} for fit in self.results.values()]
+        scored = [bayes for bayes in scores
+                  if np.isfinite(bayes.get("elpd_loo", np.nan))]
+        return len(scored), sum(1 for bayes in scored if not bayes.get("reliable"))
+
     def summary(self) -> str:
-        """Population, per-site scatter and convergence, as text."""
+        """Population, per-site scatter, ELPD and convergence, as text."""
+        scored, unreliable = self.scored()
         lines = [f"hierarchical fit: {len(self.results)} sites,"
                  f" {sum(r.n for r in self.results.values())} measurements"
                  + (f" ({len(self.skipped)} skipped)" if self.skipped else ""),
                  "",
                  "population:", self.population.to_string(), "",
                  "sigma by site:", self.sigma().to_string(index=False), "",
+                 f"ELPD: scored {scored} of {len(self.results)} site(s),"
+                 f" {unreliable} flagged unreliable by Pareto-k",
                  f"divergences {self.divergences}, worst r_hat {self.worst_r_hat:.3f}"
                  f" -> {'usable' if self.converged else 'NOT usable, see reason'}"]
+        if self.skipped:
+            lines += ["", "skipped:"] + [f"  {key}: {why}"
+                                         for key, why in self.skipped.items()]
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -614,42 +597,45 @@ class HierarchicalPowerLaw:
     site together.
     """
 
-    def __init__(self, posterior: SitePosterior, result: FitResult):
+    def __init__(self, posterior: SitePosterior, fit: Fit):
         self.posterior = posterior
-        self.result = result
+        self.result = fit
         self.site_id = posterior.site_id
 
-    def predict(self, stage):
+    def predict(self, stage: npt.ArrayLike) -> np.ndarray:
         """Posterior-mean discharge (cfs) at the given stage - :meth:`posterior_mean`."""
         return self.posterior_mean(stage)
 
-    def posterior_draws(self, stage) -> np.ndarray:
+    def posterior_draws(self, stage: npt.ArrayLike) -> np.ndarray:
         """Draws of the fitted rating (cfs), without gaging scatter."""
         return self.posterior.posterior_draws(stage)
 
-    def posterior_mean(self, stage):
+    def posterior_mean(self, stage: npt.ArrayLike) -> np.ndarray:
         """Posterior-mean discharge (cfs), ``E[exp(mu)]``."""
         predicted = self.posterior.posterior_mean(stage)
         return float(predicted[0]) if np.ndim(stage) == 0 else predicted
 
-    def posterior_predictive(self, stage, **kwargs) -> np.ndarray:
+    def posterior_predictive(self, stage: npt.ArrayLike, **kwargs) -> np.ndarray:
         """Posterior predictive draws (cfs): the rating plus a draw of the scatter."""
         return self.posterior.posterior_predictive(stage, **kwargs)
 
-    def interval(self, stage, level: float = 0.95, **kwargs) -> tuple:
+    def interval(self, stage: npt.ArrayLike, level: float = 0.95,
+                 **kwargs) -> tuple[np.ndarray, np.ndarray]:
         """Lower and upper discharge at the given stage."""
         lower, upper = self.posterior.interval(stage, level, **kwargs)
         if np.ndim(stage) == 0:
             return float(lower[0]), float(upper[0])
         return lower, upper
 
-    def curve(self, stage=None, level: float = 0.95) -> pd.DataFrame:
+    def curve(self, stage: npt.ArrayLike | None = None,
+              level: float = 0.95) -> pd.DataFrame:
         """The fitted rating as a table, on the fitted grid unless `stage` is given."""
         if stage is None:
             return self.result.curve
         return self.posterior.table(stage)
 
-    def table(self, *, stage_min=None, stage_max=None, step: float = 0.01
+    def table(self, *, stage_min: float | None = None,
+              stage_max: float | None = None, step: float = 0.01
               ) -> pd.DataFrame:
         """The rating on an evenly spaced stage grid, for a lookup or a spreadsheet."""
         fitted = self.result.curve["stage_ft"]
@@ -657,12 +643,12 @@ class HierarchicalPowerLaw:
         high = fitted.max() if stage_max is None else stage_max
         return self.posterior.table(np.arange(low, high + step, step))
 
-    def equation(self) -> dict:
+    def equation(self) -> dict[str, object]:
         """Posterior-mean parameters in the package's usual log-space form."""
         return self.posterior.equation()
 
     @property
-    def metrics(self) -> dict:
+    def metrics(self) -> dict[str, float]:
         return self.result.metrics
 
     def __repr__(self) -> str:
@@ -672,18 +658,19 @@ class HierarchicalPowerLaw:
 # --- fitting ------------------------------------------------------------------
 
 
-def fit_hierarchical(samples, *, reference: bool = True, seed: int = settings.SEED,
+def fit_hierarchical(samples: Sample | Sequence[Sample], *,
+                     reference: bool = True, seed: int = settings.SEED,
                      draws: int = 1000, tune: int = 3000,
-                     target_accept: float = 0.99, nuts_sampler: str = None,
+                     target_accept: float = 0.99, nuts_sampler: str | None = None,
                      progressbar: bool = False, reloo: bool = False,
-                     max_refits: int = None) -> HierarchicalFit:
+                     max_refits: int | None = None) -> HierarchicalFit:
     """Fit every site in one model.
 
     Parameters
     ----------
-    samples : Sample or list or dict
-        The sites to fit. A mapping is keyed by site id; a list takes each sample's
-        ``site_id``.
+    samples : Sample or sequence of Sample
+        The sites to fit. Each is keyed by its own :attr:`Sample.sample_id`, which is
+        what makes ``magl:SBR-01`` and ``colocated:SBR-01`` two sites rather than one.
     reference : bool, default True
         Also fit the colocated USGS gages. They carry the measurements that determine
         the population, so without them the sites' scatter rests on its prior alone.
@@ -715,11 +702,14 @@ def fit_hierarchical(samples, *, reference: bool = True, seed: int = settings.SE
 
     Notes
     -----
-    Each site's ``FitResult.bayes`` carries its own PSIS-LOO scores, split out of the
+    Each site's ``Fit.bayes`` carries its own PSIS-LOO scores, split out of the
     single joint score - see :func:`_site_scores` for what that number means, which is
     not the same as the score an independently fitted site would earn.
     """
-    requested = _as_mapping(samples)
+    if isinstance(samples, Sample):
+        samples = [samples]
+    requested = {sample.sample_id or f"site_{position}": sample
+                 for position, sample in enumerate(samples)}
     skipped = {key: "no measurements with positive discharge and finite stage"
                for key, sample in requested.items()
                if not _usable(sample.to_frame()).shape[0]}
@@ -760,7 +750,7 @@ def _site_scores(idata, observations: pd.DataFrame, requested: dict) -> dict:
     """Per-site PSIS-LOO and WAIC, split out of the one joint score.
 
     The joint fit has a single log-likelihood spanning every measurement at every
-    site, so :func:`..evaluate.metrics.elpd_by_group` scores it once and slices the
+    site, so :func:`..model_selection.elpd.elpd_by_group` scores it once and slices the
     pointwise result by site. That is exact - PSIS fits each observation's tail
     independently - and it is the only route: scoring each site separately would
     discard the joint posterior these sites were fitted under.
@@ -786,7 +776,7 @@ def _site_scores(idata, observations: pd.DataFrame, requested: dict) -> dict:
     dict
         ``{site_id: scores}``, or an empty dict when nothing could be scored.
     """
-    from ..evaluate import metrics as metrics_module
+    from ..model_selection import elpd as metrics_module
 
     try:
         scores = metrics_module.elpd_by_group(
@@ -824,7 +814,9 @@ def _assemble(idata, model, observations: pd.DataFrame, requested: dict,
     divergences = int(idata.sample_stats["diverging"].sum())
     worst_r_hat = float(az.summary(idata, var_names=["mu_sigma", "tau_sigma", "gamma",
                                                      "sigma"])["r_hat"].max())
-    warning = ("" if divergences <= MAX_DIVERGENCES and worst_r_hat <= MAX_R_HAT else
+    quotable = (divergences <= settings.MAX_DIVERGENCES
+                and worst_r_hat <= settings.R_HAT_GOOD)
+    warning = ("" if quotable else
                f"provisional: {divergences} divergence(s), worst r_hat {worst_r_hat:.3f}")
 
     groups = list(posterior.coords["group"].values)
@@ -833,7 +825,7 @@ def _assemble(idata, model, observations: pd.DataFrame, requested: dict,
 
     scores = _site_scores(idata, observations, requested)
     if reloo:
-        from ..evaluate.exact_loo import refine_hierarchical
+        from ..model_selection.exact_loo import refine_hierarchical
         scores = refine_hierarchical(
             scores, idata, observations, model, seed=seed,
             nuts_sampler=nuts_sampler, max_refits=max_refits)
@@ -864,7 +856,7 @@ def _assemble(idata, model, observations: pd.DataFrame, requested: dict,
         mu_sigma = float(posterior["mu_sigma"]
                          .isel(group=groups.index(cluster)).mean())
         sigma_mean = float(np.mean(site_posterior.sigma))
-        results[site] = FitResult(
+        results[site] = Fit(
             key="hierarchical", label="hierarchical power law", family="hierarchical",
             n=len(rows), status="ok", reason=warning,
             config={"cluster": cluster, "sigma": sigma_mean,

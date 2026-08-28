@@ -5,32 +5,15 @@ import re
 import numpy as np
 import pandas as pd
 
-from ..support import cache
+from .. import settings
+from ..helpers import cache
 from ..core import Sample
 
 log = logging.getLogger(__name__)
 
-#: USGS parameter code for discharge, cubic feet per second.
-PARAM_DISCHARGE_CFS = "00060"
-
-#: USGS parameter code for gage height, feet.
-PARAM_GAGE_HEIGHT_FT = "00065"
-
-#: Root of the Water Data STAC API, whose ``ratings`` collection holds the
-#: published rating files.
-STAC_ROOT = "https://api.waterdata.usgs.gov/stac/v0"
-_RATING_ITEM_URL = STAC_ROOT + "/collections/ratings/items/USGS-{site}.{file_type}.rdb"
-
-#: The three rating files a site may publish.
-#:
-#: ``exsa``  expanded, shift-adjusted rating - the interpolated ~0.01-ft table you
-#:           look an observed gage height up in. The shift is already applied.
-#: ``base``  the base rating points the expanded table was built from.
-#: ``corr``  stage corrections.
-RATING_FILE_TYPES = ("exsa", "base", "corr")
-
-_SITE_FILE_URL = ("https://waterservices.usgs.gov/nwis/site/?format=rdb&sites={site}"
-                  "&siteOutput=expanded&siteStatus=all")
+#: One rating file's URL in the STAC API.
+_RATING_ITEM_URL = (settings.USGS_STAC_ROOT
+                    + "/collections/ratings/items/USGS-{site}.{file_type}.rdb")
 
 # RDB header lines look like:  # //RATING OFFSET1=2.000000E+00
 _HEADER_FIELDS = re.compile(r'(\w+)="?([^"]*?)"?(?=\s+\w+=|\s*$)')
@@ -184,7 +167,8 @@ def continuous_discharge(site, start=None, end=None) -> pd.DataFrame:
     from dataretrieval import waterdata
     frame, _ = waterdata.get_continuous(
         monitoring_location_id=_monitoring_location_ids(normalize_site_id(site)),
-        parameter_code=PARAM_DISCHARGE_CFS, time=_time_interval(start, end))
+        parameter_code=settings.USGS_PARAM_DISCHARGE_CFS,
+        time=_time_interval(start, end))
     return frame
 
 
@@ -206,7 +190,8 @@ def continuous_stage(site, start=None, end=None) -> pd.DataFrame:
     from dataretrieval import waterdata
     frame, _ = waterdata.get_continuous(
         monitoring_location_id=_monitoring_location_ids(normalize_site_id(site)),
-        parameter_code=PARAM_GAGE_HEIGHT_FT, time=_time_interval(start, end))
+        parameter_code=settings.USGS_PARAM_GAGE_HEIGHT_FT,
+        time=_time_interval(start, end))
     return frame
 
 
@@ -437,7 +422,8 @@ def site_info(sites, refresh: bool = False) -> pd.DataFrame:
         rows = {}
         for site in ids:
             try:
-                text = requests.get(_SITE_FILE_URL.format(site=site), timeout=30).text
+                text = requests.get(settings.USGS_SITE_FILE_URL.format(site=site),
+                                    timeout=settings.USGS_TIMEOUT).text
                 frame = pd.read_csv(io.StringIO(text), sep="\t", comment="#",
                                     header=[0], dtype=str)
                 record = frame.iloc[1]          # row 0 is the RDB type descriptor
@@ -582,7 +568,7 @@ def rating_table(site, file_type: str = "exsa", refresh: bool = False) -> pd.Dat
     site : str
         USGS site id.
     file_type : {'exsa', 'base', 'corr'}, default 'exsa'
-        Which file (see ``RATING_FILE_TYPES``).
+        Which file (see ``settings.USGS_RATING_FILE_TYPES``).
     refresh : bool, default False
         Refetch instead of using the cache.
 
@@ -598,18 +584,20 @@ def rating_table(site, file_type: str = "exsa", refresh: bool = False) -> pd.Dat
         On an unknown `file_type`.
     """
     site = normalize_site_id(site)
-    if file_type not in RATING_FILE_TYPES:
-        raise ValueError(f"file_type must be one of {RATING_FILE_TYPES}, "
+    if file_type not in settings.USGS_RATING_FILE_TYPES:
+        raise ValueError(f"file_type must be one of "
+                         f"{settings.USGS_RATING_FILE_TYPES}, "
                          f"got {file_type!r}")
 
     def build():
         """Fetch the STAC item, then the RDB file it links to."""
         import requests
         item = requests.get(_RATING_ITEM_URL.format(site=site, file_type=file_type),
-                            timeout=30)
+                            timeout=settings.USGS_TIMEOUT)
         item.raise_for_status()
         payload = item.json()
-        text = requests.get(payload["assets"]["data"]["href"], timeout=30).text
+        text = requests.get(payload["assets"]["data"]["href"],
+                             timeout=settings.USGS_TIMEOUT).text
         frame = _parse_rdb(text)
         frame.attrs["meta"].update({"site": site, "file_type": file_type})
         return frame
@@ -679,7 +667,7 @@ def published_reference(site, sample, refresh: bool = False):
         rating. Measurements outside the published stage range are ignored rather
         than extrapolated, so ``metrics["n"]`` may be below ``len(sample)``.
     """
-    from ..core import fit_metrics
+    from ..model_selection.metrics import fit_metrics
     curve = published_rating(site, refresh=refresh)
     if curve is None or curve.empty or len(sample) == 0:
         return None

@@ -19,21 +19,17 @@ can actually be gauged.
 import numpy as np
 import pandas as pd
 
-#: Posterior draws used when scoring.
-MAX_DRAWS = 1_000
-
-#: A candidate stage is dropped when more than this fraction of draws put it at or
-#: below the stage of zero flow, where the model predicts no discharge.
-ZERO_FLOW_DRAW_FRACTION = 0.5
+from .. import settings
 
 
 def acquisition_curve(fit, stage=None, *, weight=None, measurement_sd=None,
-                      max_draws: int = MAX_DRAWS, seed: int = None) -> pd.DataFrame:
+                      max_draws: int = settings.ACQUISITION_MAX_DRAWS,
+                      seed: int = None) -> pd.DataFrame:
     """Expected information gain from one gauging at each stage.
 
     Parameters
     ----------
-    fit : BayesianRating or FitResult
+    fit : BayesianRating or Fit
         A fitted power-law rating.
     stage : array-like, optional
         Candidate stages (feet). Defaults to the fitted curve's grid.
@@ -56,7 +52,7 @@ def acquisition_curve(fit, stage=None, *, weight=None, measurement_sd=None,
         `weight` is given - ``weight`` and ``weighted_gain_nats``. One row per
         candidate stage above the stage of zero flow, ordered by stage.
     """
-    from .. import settings
+
     seed = settings.SEED if seed is None else seed
     stage = _candidate_stages(fit, stage)
 
@@ -124,7 +120,7 @@ def plot_acquisition(fit, stage=None, *, weight=None, measurement_sd=None,
 
     Parameters
     ----------
-    fit : BayesianRating or FitResult
+    fit : BayesianRating or Fit
         A fitted power-law rating.
     stage : array-like, optional
         Candidate stages (feet). Defaults to the fitted curve's grid.
@@ -184,7 +180,7 @@ def plot_acquisition(fit, stage=None, *, weight=None, measurement_sd=None,
 
 
 def _rating_of(fit):
-    """Return the fitted BayesianRating from either a rating or a FitResult."""
+    """Return the fitted BayesianRating from either a rating or a Fit."""
     rating = getattr(fit, "rating", fit)
     if not getattr(rating, "fitted", False):
         raise ValueError("the rating has not been fitted")
@@ -274,7 +270,8 @@ def _summarize(log_curve):
     with np.errstate(invalid="ignore"):
         spread = np.nanstd(masked, axis=0)
         median = np.exp(np.nanmedian(masked, axis=0))
-    return spread, median, finite.mean(axis=0) > ZERO_FLOW_DRAW_FRACTION
+    mostly_dry = finite.mean(axis=0) > settings.ACQUISITION_ZERO_FLOW_DRAW_FRACTION
+    return spread, median, mostly_dry
 
 
 def _as_weight(weight, stage):

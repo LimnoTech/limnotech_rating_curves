@@ -1,55 +1,12 @@
-"""NOAA / National Weather Service published rating curves, from the NWPS API.
-
-The NWS maintains its own stage-discharge rating at each forecast point, separate
-from the USGS rating for the same gage. Where both exist they are worth putting side
-by side: they are two agencies' answers to the same question, and a disagreement
-between them is a finding rather than a bug.
-
-What the API gives, and what it does not
-----------------------------------------
-An NWPS gauge is keyed by its NWS location id (an "LID" - five characters, e.g.
-``KWPM7``), not by a USGS site number. ``/gauges/{lid}`` returns ``usgsId`` directly,
-so going from an LID to a USGS site is easy. Going the other way is not: the API has
-no gauge search - ``?srch=``, ``?usgsId=`` and ``?bbox.*`` are all ignored and return
-the unfiltered list - and the listing carries no ``usgsId`` to filter on locally. So
-the reverse lookup comes from NOAA's HADS crosswalk instead, a flat file pairing every
-NWSLI with its USGS number; see :func:`crosswalk`.
-
-The rating itself arrives as a lookup table of stage and flow, not as an equation.
-Interpolate it (:func:`discharge_at`); do not fit anything to it.
-
-Datums
-------
-NWPS stage and USGS gage height are usually the same axis, but "usually" is not
-"always" - an NWS gage zero can differ from the USGS one, and then the two curves are
-simply not on comparable axes. :func:`datum_agreement` checks this against live
-readings from both agencies so a caller can warn. Nothing here silently shifts a
-curve to make it line up: a mismatch is the finding.
-"""
-
 import logging
 
 import numpy as np
 import pandas as pd
 
-from ..support import cache
+from .. import settings
+from ..helpers import cache
 
 log = logging.getLogger(__name__)
-
-#: Root of the National Water Prediction Service API.
-NWPS_ROOT = "https://api.water.noaa.gov/nwps/v1"
-
-#: NOAA's NWSLI-to-USGS crosswalk. A fixed-width, pipe-delimited listing with three
-#: header lines, then one row per gage: ``NWSLI|USGS number|GOES id|HSA|lat|lon|name``.
-HADS_CROSSWALK_URL = "https://hads.ncep.noaa.gov/USGS/ALL_USGS-HADS_SITES.txt"
-
-#: Largest stage difference (ft) between the two agencies' live readings that still
-#: counts as "the same axis". Wider than gauge noise, far narrower than a real datum
-#: offset, which is typically a whole foot or more.
-DATUM_TOLERANCE_FT = 0.05
-
-#: How long to wait on either web service, in seconds.
-TIMEOUT = 30
 
 
 def normalize_lid(lid) -> str:
@@ -60,7 +17,7 @@ def normalize_lid(lid) -> str:
 def _get(url: str, params=None) -> dict:
     """One JSON GET against the NWPS API."""
     import requests
-    response = requests.get(url, params=params, timeout=TIMEOUT)
+    response = requests.get(url, params=params, timeout=settings.NOAA_TIMEOUT)
     response.raise_for_status()
     return response.json()
 
@@ -88,7 +45,7 @@ def gauge_info(lid, refresh: bool = False):
     def build():
         """Fetch and flatten the gauge record, or None if there is no such gauge."""
         try:
-            payload = _get(f"{NWPS_ROOT}/gauges/{lid}")
+            payload = _get(f"{settings.NOAA_NWPS_ROOT}/gauges/{lid}")
         except Exception as exc:  # noqa: BLE001
             log.info("no NWPS gauge %s (%s)", lid, type(exc).__name__)
             return None
@@ -141,7 +98,7 @@ def published_rating(lid, only_tenths: bool = True,
         """Tidy the rating table, or an empty frame if there is none."""
         empty = pd.DataFrame(columns=["stage_ft", "discharge_cfs"])
         try:
-            payload = _get(f"{NWPS_ROOT}/gauges/{lid}/ratings",
+            payload = _get(f"{settings.NOAA_NWPS_ROOT}/gauges/{lid}/ratings",
                            params={"onlyTenths": str(bool(only_tenths)).lower()})
         except Exception as exc:  # noqa: BLE001
             log.info("no NWPS rating for %s (%s)", lid, type(exc).__name__)
@@ -190,7 +147,8 @@ def crosswalk(refresh: bool = False) -> pd.DataFrame:
         import requests
         columns = ["nws_lid", "usgs_site", "name"]
         try:
-            response = requests.get(HADS_CROSSWALK_URL, timeout=TIMEOUT)
+            response = requests.get(settings.NOAA_HADS_CROSSWALK_URL,
+                                    timeout=settings.NOAA_TIMEOUT)
             response.raise_for_status()
         except Exception as exc:  # noqa: BLE001
             log.info("could not fetch the HADS crosswalk (%s)", type(exc).__name__)
@@ -313,7 +271,7 @@ def published_reference(lid, sample, refresh: bool = False):
         rating. Measurements outside the table's stage range are ignored rather than
         extrapolated, so ``metrics["n"]`` may be below ``len(sample)``.
     """
-    from ..core import fit_metrics
+    from ..model_selection.metrics import fit_metrics
     lid = normalize_lid(lid)
     curve = published_rating(lid, refresh=refresh)
     if curve is None or curve.empty or len(sample) == 0:
@@ -371,7 +329,7 @@ def datum_agreement(lid, refresh: bool = False) -> dict:
             return {**unknown,
                     "note": f"USGS {site} published no gage height at {stamp}"}
         difference = float(nwps_stage) - float(usgs_stage)
-        agrees = abs(difference) <= DATUM_TOLERANCE_FT
+        agrees = abs(difference) <= settings.NOAA_DATUM_TOLERANCE_FT
         return {"agrees": bool(agrees), "difference_ft": difference,
                 "nwps_stage_ft": float(nwps_stage), "usgs_stage_ft": float(usgs_stage),
                 "usgs_site": site, "time": stamp,
@@ -390,7 +348,7 @@ def _usgs_stage_at(site, timestamp):
     Returns the reading closest to `timestamp` within a short window, or None.
     """
     import requests
-    from .usgs import normalize_site_id, PARAM_GAGE_HEIGHT_FT
+    from .usgs import normalize_site_id
 
     site = normalize_site_id(site)
     wanted = pd.to_datetime(timestamp, utc=True, errors="coerce")
@@ -399,12 +357,13 @@ def _usgs_stage_at(site, timestamp):
     window = pd.Timedelta("2h")
     try:
         response = requests.get(
-            "https://waterservices.usgs.gov/nwis/iv/",
-            params={"sites": site, "parameterCd": PARAM_GAGE_HEIGHT_FT,
+            settings.USGS_INSTANTANEOUS_URL,
+            params={"sites": site,
+                    "parameterCd": settings.USGS_PARAM_GAGE_HEIGHT_FT,
                     "format": "json",
                     "startDT": (wanted - window).strftime("%Y-%m-%dT%H:%MZ"),
                     "endDT": (wanted + window).strftime("%Y-%m-%dT%H:%MZ")},
-            timeout=TIMEOUT)
+            timeout=settings.NOAA_TIMEOUT)
         response.raise_for_status()
         series = response.json()["value"]["timeSeries"]
     except Exception as exc:  # noqa: BLE001

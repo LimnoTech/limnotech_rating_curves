@@ -4,6 +4,10 @@ __pycache__/
 output/
 .pytest_cache/
 lrc_cache/
+*.zip
+# a local .env is per-machine configuration; .env.example is the tracked template
+.env
+!.env.example
 
 examples/spreadsheet_ratings.ipynb
 examples/live_worksession.ipynb
@@ -19,3 +23,4 @@ examples/maps_output/
 !README.md
 !docs/**/*.md
 *.html
+experiments/

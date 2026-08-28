@@ -1,4 +1,5 @@
-from . import datum, magl, noaa, pagaia, pagaia_corrections, usgs, zero_flow
+from . import (datum, magl, magl_spreadsheets, noaa, pagaia, pagaia_corrections,
+               usgs, zero_flow)
 from .datum import StageDatum, distance_to_stage, in_units, to_gage_height
 from .magl import (colocated_sample, flow_sheet_sample, list_sensors, list_sites,
                    rating_curve_sheet, sensor_sample)
@@ -22,5 +23,6 @@ __all__ = [
     # stage of zero flow
     "johnson_offset", "estimate_zero_flow", "ZeroFlowEstimate",
     # modules
-    "usgs", "noaa", "pagaia", "pagaia_corrections", "magl", "datum", "zero_flow",
+    "usgs", "noaa", "pagaia", "pagaia_corrections", "magl", "magl_spreadsheets",
+    "datum", "zero_flow",
 ]

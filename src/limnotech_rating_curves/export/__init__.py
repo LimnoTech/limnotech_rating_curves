@@ -1,4 +1,4 @@
-from . import mapview, plots
+from . import exports, mapview, plots
 from .mapview import build_figure, build_map
 from .plots import (plot_fit_check, plot_fold, plot_high_flow_error, plot_log_log,
                     plot_ranking, plot_rating_cloud, plot_rating_deviation,
@@ -11,5 +11,5 @@ __all__ = [
     "plot_record", "plot_rating_cloud", "plot_rating_deviation",
     "save_site_figure", "save_fold_figures",
     "build_map",
-    "plots", "mapview",
+    "plots", "mapview", "exports",
 ]

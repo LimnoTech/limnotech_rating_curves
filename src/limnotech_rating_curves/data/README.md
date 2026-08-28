@@ -91,18 +91,32 @@ Site registry, co-location, control-point survey, and the discharge exports.
 | `colocated_sample(station, gage=None)` | USGS field discharge against the co-located MAGL sensor's stage |
 | `list_sites()`, `list_sensors()`, `site_directory()` | What can be fitted, and with which loader |
 | `discharge_measurements()`, `discharge_report()` | The manual discharge exports, cleaned |
-| `site_registry()`, `clusters()`, `station_cluster`, `gage_cluster`, `gages_in_cluster`, `all_gages` | The registry in [`magl_sites.yaml`](magl_sites.yaml) |
+| `site_registry()`, `clusters()`, `station_cluster`, `gage_cluster`, `gages_in_cluster`, `all_gages` | The registry, a directory of CSVs - see [`data/magl/sites/`](../../../data/magl/sites/README.md) |
 | `colocated_gage`, `colocated_station`, `colocated_pairs` | Station ↔ gage pairing |
 | `water_surface_elevation_ft(station)` | NAVD88 water surface for one station |
 | `distance_record_ft(station)` | Merged distance-to-surface record (spreadsheet + pagaia) |
-| `spreadsheet_distance_ft`, `pagaia_distance_ft` | Either source alone |
+| `pagaia_distance_ft(station)` | The database source alone (the spreadsheet source is in `magl_spreadsheets.py`) |
 | `control_point_elevations()`, `sensor_moves()`, `reference_elevation(station, index)` | The survey and its changes over time |
-| `control_point_offsets()`, `control_point_offset(station)` | Gap between surveyed control point and the sensor's own datum |
 | `sensor_elevation(station, index)` | Elevation the distance readings are measured from; subtract a distance to get water-surface elevation |
 | `stage_at_times(station, times)` | Stage at the instants discharge was measured |
 | `rating_curve_sheet(path)`, `flow_sheet_sample(path)` | Measurements out of a flow workbook |
 | `pagaia_session()`, `pagaia_stations(stations)` | The network's pagaia connection |
-| `cross_validate(sample)` | Leave-one-out, because MAGL samples are tiny |
+| `cross_validate(sample)` | Leave-one-out |
+
+## `magl_spreadsheets.py` — the historical stage record
+
+The scraped Excel timeseries (`magl_spreadsheet_timeseries.pkl`): one frame per
+station, in feet. Still the only source for the earliest part of every record, and
+the only place the control-point offset can be measured, because these frames carry
+both the raw distance reading and the spreadsheet's own derived elevation.
+
+| Name | Purpose |
+| --- | --- |
+| `frames()` | `{station: DataFrame}` out of the pickle, memoized |
+| `distance_ft(station)` | Distance-to-surface from the spreadsheet, in feet, QA/QC applied |
+| `control_point_offsets()`, `control_point_offset(station)` | Gap between the surveyed control point and the sensor's own datum |
+| `clean_series(series)` | tz-naive, sorted, de-duplicated float series |
+
 
 ## `magl_workbook.py` — the field workbooks' own ratings
 

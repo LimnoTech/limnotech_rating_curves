@@ -9,103 +9,41 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ..core import SiteRating
-from ..evaluate.crossval import CrossValidation
-from ..evaluate import metrics as metrics_module
+from ..site import SiteRating
+from ..model_selection.crossval import CrossValidation
+from ..model_selection import elpd as metrics_module
 from ..models import catalog
 from .. import settings
+# The figure's geometry and styling are settings, and every one of them is
+# overridable from the environment. They are imported under their short names because
+# the layout code below is dense with them and reads as geometry, not as lookups.
+from ..settings import (MAP_BAND_ALPHA as BAND_ALPHA,
+                        MAP_BASEMAP_LAYERS as BASEMAP_LAYERS,
+                        MAP_BUTTON_ROW_HEIGHT as BUTTON_ROW_HEIGHT,
+                        MAP_DOMAIN_X,
+                        MAP_DOWNLOAD_XY as DOWNLOAD_XY,
+                        MAP_EXPORT_ZIP_NAME as EXPORT_ZIP_NAME,
+                        MAP_EXPORT_ZIP_SUFFIX as EXPORT_ZIP_SUFFIX,
+                        MAP_EXTERNAL_STYLE as EXTERNAL_STYLE,
+                        MAP_FALLBACK_EXTERNAL_STYLE as _FALLBACK_EXTERNAL,
+                        MAP_FALLBACK_SOURCE_STYLE as _FALLBACK_STYLE,
+                        MAP_FIGURE_HEIGHT as FIGURE_HEIGHT,
+                        MAP_FOLD_ROW_Y as FOLD_ROW_Y,
+                        MAP_MODEL_ROW_Y as MODEL_ROW_Y,
+                        MAP_PANEL_X as PANEL_X,
+                        MAP_PANE_ROW_Y as PANE_ROW_Y,
+                        MAP_PLOT_DOMAIN_Y as PLOT_DOMAIN_Y,
+                        MAP_SOURCE_STYLE as SOURCE_STYLE,
+                        MAP_TABLE_DOMAIN_Y_NO_CV as TABLE_DOMAIN_Y_NO_CV,
+                        MAP_TABLE_DOMAIN_Y_WITH_CV as TABLE_DOMAIN_Y_WITH_CV,
+                        MAP_TITLE_Y as TITLE_Y,
+                        MAP_TOP_MARGIN as TOP_MARGIN,
+                        MAP_VIEW_ROW_Y as VIEW_ROW_Y)
 
 if TYPE_CHECKING:
     import plotly.graph_objects as go
 
 log = logging.getLogger(__name__)
-
-#: Esri topographic basemap with a hydrography overlay. Raster tiles, so the map
-#: needs no map-provider token.
-BASEMAP_LAYERS = [
-    {"below": "traces", "sourcetype": "raster", "type": "raster",
-     "sourceattribution": "Esri, USGS, NOAA - World Topographic Map",
-     "source": ["https://services.arcgisonline.com/ArcGIS/rest/services/"
-                "World_Topo_Map/MapServer/tile/{z}/{y}/{x}"]},
-    {"below": "traces", "sourcetype": "raster", "type": "raster",
-     "sourceattribution": "Esri - World Hydro Reference Overlay",
-     "source": ["https://services.arcgisonline.com/ArcGIS/rest/services/Reference/"
-                "World_Hydro_Reference_Overlay/MapServer/tile/{z}/{y}/{x}"]},
-]
-
-#: How each sample source is drawn: (legend name, marker color, longitude jitter).
-#: The jitter keeps co-located sites individually hoverable.
-SOURCE_STYLE = {
-    "usgs_gage": ("USGS discharge + USGS stage", "#08519c", 0.0),
-    "colocated": ("USGS discharge + MAGL stage (co-located)", "#e6550d", 0.0007),
-    "magl": ("MAGL discharge + MAGL stage", "#31a354", -0.0007),
-    "pagaia": ("pagaia station", "#756bb1", 0.0014),
-}
-_FALLBACK_STYLE = ("sites", "#7f7f7f", 0.0)
-
-#: How each kind of external curve is drawn. The two are deliberately far apart: one
-#: is a federal agency's published rating and the other is an equation somebody typed
-#: into a spreadsheet, and a reader must never have to guess which is which.
-EXTERNAL_STYLE = {
-    "published_reference": {"color": "#000000", "dash": "dash", "width": 2.5,
-                            "legend": "USGS published rating"},
-    "spreadsheet": {"color": "#e7298a", "dash": "longdashdot", "width": 3.2,
-                    "legend": "field spreadsheet equation"},
-}
-_FALLBACK_EXTERNAL = {"color": "#404040", "dash": "dot", "width": 2.5,
-                      "legend": "external curve"}
-
-#: Opacity of a credible / prediction band's fill.
-BAND_ALPHA = 0.16
-
-#: Figure height in pixels. Fixed, because the panel geometry below is in paper
-#: coordinates and a button row's height in paper units depends on it - a taller
-#: figure would leave gaps and a shorter one would make the control rows collide.
-FIGURE_HEIGHT = 900
-
-# --- right-hand panel geometry -----------------------------------------------
-# One place, so the collision check and the layout read the same numbers.
-
-#: Left edge of everything in the inspector, and of the map's right edge.
-PANEL_X = [0.63, 1.0]
-MAP_DOMAIN_X = [0.0, 0.575]
-
-#: The rating plot.
-PLOT_DOMAIN_Y = [0.56, 0.94]
-
-#: The two rows above the plot, both anchored at the top and growing downward: the
-#: pane toggle, then the posterior / posterior-predictive toggle under it. The site
-#: title sits above both. ``TOP_MARGIN`` has to cover all three, or Plotly clips them.
-#: What the export archive is called. :func:`build_map` names it after the HTML it
-#: sits beside - ``hierarchical_map.html`` gets ``hierarchical_map_fits.zip`` - so
-#: several maps can share a directory, and the button offers that same name.
-#: :data:`EXPORT_ZIP_NAME` is the fallback for :func:`build_figure`, which writes
-#: nothing and so has no stem to borrow.
-EXPORT_ZIP_SUFFIX = "_fits.zip"
-EXPORT_ZIP_NAME = "rating_fits.zip"
-
-#: Where the export button sits: inside the map's top-left corner, clear of the legend
-#: in the bottom-left and of the inspector's control rows on the right.
-DOWNLOAD_XY = (0.008, 0.988)
-
-PANE_ROW_Y = 1.085
-VIEW_ROW_Y = 1.043
-TITLE_Y = 1.105
-TOP_MARGIN = 110
-
-#: The control row, present only with cross-validation: the model selector, then the
-#: fold arrows under it. Both are anchored at the top and grow downward.
-MODEL_ROW_Y = 0.530
-FOLD_ROW_Y = 0.480
-
-#: A button row's height, in paper units at ``FIGURE_HEIGHT``. Used only by the
-#: collision check, which has to know how far a top-anchored row reaches down.
-BUTTON_ROW_HEIGHT = 34.0 / FIGURE_HEIGHT
-
-#: The score table. Two variants, because without the control row there is space for
-#: more rows and leaving it empty would be waste.
-TABLE_DOMAIN_Y_WITH_CV = [0.02, 0.43]
-TABLE_DOMAIN_Y_NO_CV = [0.02, 0.51]
 
 #: Column widths of the score table, as fractions of the panel. The first column is
 #: the curve's name and needs the room.
@@ -858,7 +796,7 @@ def export_bundle(sites, *, require_posterior: bool = False) -> "tuple[bytes, in
     """
     import tempfile
     import zipfile
-    from .. import exports
+    from . import exports
 
     written, raw_bytes = [], 0
     buffer = io.BytesIO()
@@ -1124,15 +1062,15 @@ def build_map(sites: list[SiteRating],
     output_html : path-like, optional
         Where to write. Defaults to ``settings.MAP_HTML``.
     cv_data : dict, optional
-        ``{sample_id: CrossValidation}`` - the cross-validation results themselves,
-        as :func:`~limnotech_rating_curves.workflows.batch.cross_validate_sites`
-        returns them. The fold curves, the pooled / per-fold summary tables and the
+        ``{sample_id: CrossValidation}`` - one
+        :func:`~limnotech_rating_curves.cross_validate` result per site. The fold
+        curves, the pooled / per-fold summary tables and the
         scheme are read off each result here. When omitted the cross-validation pane
         and its controls are left out entirely and the score table takes the extra
         room.
     comparison_rows : callable, optional
         ``f(site) -> list of dict`` producing the score-table rows. Defaults to
-        :func:`limnotech_rating_curves.evaluate.metrics.comparison_rows`.
+        :func:`limnotech_rating_curves.model_selection.elpd.comparison_rows`.
     title : str
         Figure title.
     default_site : str, optional

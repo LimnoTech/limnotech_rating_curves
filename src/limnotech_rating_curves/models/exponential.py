@@ -5,7 +5,8 @@ import numpy as np
 import pandas as pd
 
 from .. import settings
-from ..core import FitResult, fit_metrics
+from ..core import Fit
+from ..model_selection.metrics import fit_metrics
 
 log = logging.getLogger(__name__)
 
@@ -212,8 +213,8 @@ def fit_exponential(stage, discharge, min_points: int = 3) -> ExponentialRating:
 
 
 def fit(sample, *, key: str, label: str, min_points: int = 3,
-        enforce_min_points: bool = True, level: float = 0.95, **ignored) -> FitResult:
-    """Fit an exponential rating and package it as a :class:`FitResult`.
+        enforce_min_points: bool = True, level: float = 0.95, **ignored) -> Fit:
+    """Fit an exponential rating and package it as a :class:`Fit`.
 
     Mirrors :func:`limnotech_rating_curves.models.polynomial.fit` so the catalog can
     treat every family the same way. Sampler keywords (``method``, ``seed``,
@@ -224,32 +225,32 @@ def fit(sample, *, key: str, label: str, min_points: int = 3,
     stage = frame["stage_ft"].to_numpy(float)
     discharge = frame["discharge_cfs"].to_numpy(float)
 
-    result = FitResult(
+    fit = Fit(
         key=key, label=label, family="exponential", n=len(frame),
         status="skipped", reason="",
         config={"method": "least_squares_log", "min_points": min_points,
                 "interval": f"{level:.0%} prediction interval, computed on log Q"})
     if enforce_min_points and len(frame) < min_points:
-        result.reason = (f"{len(frame)} measurements, fewer than the {min_points} an "
+        fit.reason = (f"{len(frame)} measurements, fewer than the {min_points} an "
                          f"exponential fit needs")
-        return result
+        return fit
     try:
         fitted = fit_exponential(stage, discharge, min_points=min_points)
     except Exception as exc:  # noqa: BLE001
-        result.status = "failed"
-        result.reason = f"{type(exc).__name__}: {exc}"
-        return result
+        fit.status = "failed"
+        fit.reason = f"{type(exc).__name__}: {exc}"
+        return fit
 
-    result.status = "ok"
-    result.rating = fitted
-    result.curve = fitted.table(level=level)
-    result.predicted = fitted.predict(stage, clip=False)
-    result.metrics = fit_metrics(discharge, result.predicted)
-    result.config.update({
+    fit.status = "ok"
+    fit.rating = fitted
+    fit.curve = fitted.table(level=level)
+    fit.predicted = fitted.predict(stage, clip=False)
+    fit.metrics = fit_metrics(discharge, fit.predicted)
+    fit.config.update({
         "amplitude": fitted.amplitude, "rate": fitted.rate,
         "stage_offset": fitted.stage_offset,
         # both, deliberately: the log-space number is what Excel shows and it is
         # always the flattering one
         "r_squared": fitted.r_squared, "r_squared_log": fitted.r_squared_log,
         "effective_range": list(fitted.effective_range)})
-    return result
+    return fit

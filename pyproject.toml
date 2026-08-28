@@ -44,8 +44,10 @@ dependencies = [
     "openpyxl>=3.1",
     "netcdf4",
     "pyarrow",
-    "pyyaml>=6.0",
     "requests>=2.31",
+    # reads a .env into os.environ before the package is imported, so every
+    # setting in settings.py can be configured from a file. See .env.example.
+    "python-dotenv>=1.0",
     # notebooks and tests
     "jupyter",
     "ipykernel",
@@ -67,9 +69,6 @@ Homepage = "https://github.com/LimnoTech/limnotech-rating-curves"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-"limnotech_rating_curves.data" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

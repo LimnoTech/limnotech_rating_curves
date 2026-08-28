@@ -8,14 +8,12 @@ import pandas as pd
 
 from .models import catalog
 from . import settings
-from .core import Metrics, Sample
+from .core import Sample
+from .model_selection.metrics import Metrics
 
 log = logging.getLogger(__name__)
 
 
-def _quantile_z(level: float) -> float:
-    """The standard-normal quantile bounding a central interval of `level`."""
-    return NormalDist().inv_cdf((1 + float(level)) / 2)
 
 
 class RatingModel:
@@ -35,8 +33,6 @@ class RatingModel:
                                 spreadsheet or a lookup
     ``metrics``                 fit and predictive scores
     ``cross_validate()``        refit on subsets and score the held-out points
-    ``logo(block)``             leave-one-group-out ELPD, for data that is not
-                                independent of itself (a continuous record)
     ``summary()``               posterior summary of the parameters
     ``diagnostics()``           convergence diagnostics (R-hat, ESS)
     ``plot(ax)``                measurements, curve and band
@@ -88,7 +84,7 @@ class RatingModel:
 
     @property
     def result(self):
-        """The underlying :class:`~limnotech_rating_curves.core.FitResult`."""
+        """The underlying :class:`~limnotech_rating_curves.core.Fit`."""
         return self._fit
 
     def _require_fit(self):
@@ -185,7 +181,7 @@ class RatingModel:
             raise RuntimeError(f"{self.name} could not be fitted: {self._fit.reason}")
         self.sample = sample
         # kept so a refit on a subset can reproduce this fit rather than a default one
-        # (see limnotech_rating_curves.evaluate.exact_loo)
+        # (see limnotech_rating_curves.model_selection.exact_loo)
         self.fit_arguments = {"method": method, "seed": seed, "zero_flow": zero_flow,
                               "cores": cores, "advi_iters": advi_iters,
                               "nuts_sampler": nuts_sampler}
@@ -333,7 +329,10 @@ class RatingModel:
                 return evaluated
             median = table["discharge_predictive_median_cfs"].to_numpy(float)
             gse = table["gse"].to_numpy(float)
-            z = _quantile_z(level)
+
+            # The standard-normal quantile bounding a central interval of `level`.
+            z = NormalDist().inv_cdf((1 + float(level)) / 2)
+
             evaluated = pd.DataFrame({
                 "stage_ft": table["stage_ft"].to_numpy(float),
                 "discharge_cfs": table["discharge_cfs"].to_numpy(float),
@@ -403,7 +402,7 @@ class RatingModel:
         >>> rating.table(stage_max=40.0, step=0.001, path="rating_table.csv")
         ... # doctest: +SKIP
         """
-        from .exports import rating_table
+        from .export.exports import rating_table
 
         self._require_fit()
         fitted = self.curve()
@@ -459,7 +458,7 @@ class RatingModel:
         With ``settings.RELOO`` on, ``elpd_loo`` is then repaired by refitting the
         measurements whose Pareto-k says PSIS could not be trusted at them - which
         costs a NUTS fit apiece, and is why the flag is off by default. See
-        :mod:`limnotech_rating_curves.evaluate.exact_loo`.
+        :mod:`limnotech_rating_curves.model_selection.exact_loo`.
 
         Returns
         -------
@@ -469,73 +468,10 @@ class RatingModel:
         if not self._fit.bayes:
             self._fit.bayes = self.entry.bayes_metrics(self._fit)
             if settings.RELOO:
-                from .evaluate.exact_loo import refine
+                from .model_selection.exact_loo import refine
                 self._fit.bayes = refine(self._fit, self.sample, self.entry,
                                          fit_arguments=self.fit_arguments)
         return Metrics.from_fit(self._fit)
-
-    def logo(self, block: str = "6h", *, groups=None) -> dict:
-        """Leave-one-group-out ELPD for this fit, blocked in time.
-
-        The score to read instead of ``metrics.elpd_loo`` when the measurements are
-        not independent of each other - a continuous 15-minute record above all,
-        where leaving out one reading leaves its neighbours 15 minutes either side in
-        the training set and the resulting ELPD is optimistic. Blocking in time makes
-        the held-out unit span more than one reading. See
-        :mod:`limnotech_rating_curves.evaluate.logo` for why this is the same PSIS
-        estimator rather than a different one, for why it is worth using on field
-        measurements too (a block this short on gaugings is leave-one-out for almost
-        every point, so one estimator covers both), and for the measured sweep the
-        default block length comes from.
-
-        Needs the sample's timestamps and the posterior in memory, so it is available
-        for a NUTS fit of a Bayesian family and not for an ADVI fit, a least-squares
-        family, or a fit that crossed a process boundary.
-
-        Parameters
-        ----------
-        block : str, default ``"6h"``
-            Block length as a pandas offset alias, when `groups` is not given. Six
-            hours is :data:`limnotech_rating_curves.evaluate.logo.DEFAULT_BLOCK`,
-            chosen from a measured reliability sweep; a longer block is more honest
-            about autocorrelation but quickly becomes impossible for PSIS to compute,
-            so check ``reliable`` on the result.
-        groups : array-like, optional
-            Group label per measurement, overriding `block` - e.g. from
-            :func:`limnotech_rating_curves.evaluate.logo.stage_bands` to ask whether
-            the curve generalizes to a flow range it never saw.
-
-        Returns
-        -------
-        dict
-            What :func:`limnotech_rating_curves.evaluate.logo.elpd_logo` returns,
-            including ``elpd_per_obs`` and ``obs_per_group``, or NaNs with a ``note``
-            saying why it could not be computed.
-        """
-        from .evaluate import logo as logo_module
-        from .evaluate import metrics as metrics_module
-
-        self._require_fit()
-        pointwise = metrics_module.pointwise_log_likelihood(self._fit)
-        if pointwise is None:
-            return {**metrics_module.unavailable(
-                "no pointwise log-likelihood - needs a NUTS fit of a Bayesian family, "
-                "with its posterior still in memory"),
-                "n_groups": 0, "n_observations": 0,
-                "obs_per_group": float("nan"), "elpd_per_obs": float("nan")}
-        log_likelihood, log_offset = pointwise
-
-        if groups is None:
-            time = getattr(self.sample, "time", None)
-            if time is None:
-                return {**metrics_module.unavailable(
-                    "the sample carries no timestamps, so it cannot be blocked in "
-                    "time; pass groups= to block it some other way"),
-                    "n_groups": 0, "n_observations": 0,
-                    "obs_per_group": float("nan"), "elpd_per_obs": float("nan")}
-            groups = logo_module.time_blocks(time, block=block)
-
-        return logo_module.elpd_logo(log_likelihood, groups, log_offset=log_offset)
 
     def cross_validate(self, **kwargs):
         """Refit this model on subsets of its own sample and score the held-out points.
@@ -578,7 +514,7 @@ class RatingModel:
             sample size per parameter.
         """
         self._require_fit()
-        from .evaluate import diagnostics
+        from .model_selection import diagnostics
         return diagnostics.posterior_summary(self._fit, var_names=var_names)
 
     def diagnostics(self) -> pd.DataFrame:
@@ -589,11 +525,11 @@ class RatingModel:
         pandas.DataFrame
             One row per parameter with ``r_hat``, ``ess_bulk``, ``ess_tail`` and a
             ``converged`` flag. See
-            :mod:`limnotech_rating_curves.evaluate.diagnostics` for what the thresholds
+            :mod:`limnotech_rating_curves.model_selection.diagnostics` for what the thresholds
             mean.
         """
         self._require_fit()
-        from .evaluate import diagnostics
+        from .model_selection import diagnostics
         return diagnostics.convergence(self._fit)
 
     def pareto_k(self) -> pd.DataFrame:
@@ -610,7 +546,7 @@ class RatingModel:
         """
         self._require_fit()
         _ = self.metrics                      # ensure the Bayesian scores exist
-        from .evaluate import metrics as metrics_module
+        from .model_selection import elpd as metrics_module
         values = metrics_module.pareto_k_per_point(self._fit)
         reliable = pd.array(values <= settings.PARETO_K_GOOD, dtype="boolean")
         reliable[~np.isfinite(values)] = pd.NA
@@ -644,7 +580,7 @@ class RatingModel:
 
         The curve is drawn over the whole padded grid it was fitted on, and the
         part outside the measured stage range is drawn in
-        :data:`~limnotech_rating_curves.view.plots.EXTRAPOLATION_COLOR` rather than
+        ``settings.PLOT_EXTRAPOLATION_COLOR`` rather than
         being cut off, so every family covers the same stages and the unsupported
         part of the curve is visible as such.
 
@@ -664,7 +600,7 @@ class RatingModel:
         """
         self._require_fit()
         import matplotlib.pyplot as plt
-        from .view import plots
+        from .export import plots
         if ax is None:
             _, ax = plt.subplots(figsize=(7.5, 5.5))
         measured_range = (self.sample.stage_range if self.sample is not None
@@ -672,7 +608,7 @@ class RatingModel:
         plots.draw_curve(ax, self.curve(level=level), measured_range,
                          color=self.color, label=self.label, level=level,
                          linewidth=2.4,
-                         extrapolation_label=plots.EXTRAPOLATION_LABEL)
+                         extrapolation_label=settings.PLOT_EXTRAPOLATION_LABEL)
         if self.sample is not None:
             ax.scatter(self.sample.stage_ft, self.sample.discharge_cfs, s=45,
                        facecolor="white", edgecolor="black", zorder=5,
@@ -703,7 +639,7 @@ class RatingModel:
         matplotlib.axes.Axes
         """
         self._require_fit()
-        from .view import plots
+        from .export import plots
         return plots.plot_residual_ratio(self, ax)
 
     def plot_check(self, *, zero_flow=None, level: float = 0.95, figsize=(13, 4.5)):
@@ -724,7 +660,7 @@ class RatingModel:
         numpy.ndarray of matplotlib.axes.Axes
         """
         self._require_fit()
-        from .view import plots
+        from .export import plots
         return plots.plot_fit_check(self, zero_flow=zero_flow, level=level,
                                     figsize=figsize)
 
@@ -1130,7 +1066,7 @@ def _cross_validate(sample, model_keys, fit_arguments, kwargs):
     the NUTS implementation - are carried into the folds, so a sweep refits the model
     that was fitted rather than a default one. Anything passed explicitly wins.
     """
-    from .evaluate import crossval
+    from .model_selection import crossval
     kwargs.setdefault("models", list(model_keys))
     for name in ("zero_flow", "nuts_sampler"):
         if fit_arguments.get(name) is not None:
@@ -1333,7 +1269,7 @@ class RatingSet:
             ``elpd_loo``, ``se_loo``, ``p_loo``, ``pareto_k_max``. Any published
             reference curve is appended at the end (with no Bayesian scores, since
             it has no posterior). See
-            :data:`limnotech_rating_curves.evaluate.metrics.METRIC_GLOSSARY` for what each
+            :data:`limnotech_rating_curves.model_selection.elpd.METRIC_GLOSSARY` for what each
             column means.
         """
         rows = []
@@ -1423,7 +1359,7 @@ class RatingSet:
         matplotlib.axes.Axes
         """
         import matplotlib.pyplot as plt
-        from .view import plots
+        from .export import plots
         if ax is None:
             _, ax = plt.subplots(figsize=(8.5, 6))
         ax.scatter(self.sample.stage_ft, self.sample.discharge_cfs, s=45,
@@ -1441,7 +1377,7 @@ class RatingSet:
                 or (curve["stage_ft"] > measured_range[1]).any())
         if extrapolated:
             ax.plot([], [], color="0.4", ls=":", lw=2.2,
-                    label=plots.EXTRAPOLATION_LABEL)
+                    label=settings.PLOT_EXTRAPOLATION_LABEL)
         if self.reference:
             reference_curve = self.reference["curve"].sort_values("stage_ft")
             ax.plot(reference_curve["stage_ft"], reference_curve["discharge_cfs"],
@@ -1471,7 +1407,7 @@ class RatingSet:
         -------
         matplotlib.axes.Axes
         """
-        from .view import plots
+        from .export import plots
         return plots.plot_residual_ratio(self, ax)
 
     def plot_ranking(self, ax=None):
@@ -1487,7 +1423,7 @@ class RatingSet:
         matplotlib.axes.Axes or None
             None when no model has a predictive score to rank.
         """
-        from .view import plots
+        from .export import plots
         return plots.plot_ranking(self, ax)
 
     def summary(self, var_names=None) -> pd.DataFrame:

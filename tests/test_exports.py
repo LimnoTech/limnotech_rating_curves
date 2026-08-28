@@ -5,8 +5,8 @@ import pandas as pd
 import pytest
 
 import limnotech_rating_curves as lrc
-from limnotech_rating_curves import exports
-from limnotech_rating_curves.core import SiteRating
+from limnotech_rating_curves.export import exports
+from limnotech_rating_curves.site import SiteRating
 from limnotech_rating_curves.models import catalog
 
 
@@ -146,8 +146,8 @@ def test_a_swapped_posterior_is_caught_by_the_checksum(measurements, tmp_path):
         exports.load_rating(path).posterior()
 
 
-def test_save_site_round_trips_a_whole_batch_site(measurements, tmp_path):
-    """The bug this format existed to have and did not: a batch run's directory
+def test_save_site_round_trips_a_whole_site(measurements, tmp_path):
+    """The bug this format existed to have and did not: a multi-site run's directory
     must load back."""
     sample = lrc.Sample.of(measurements, site_id="SBR-99", source="magl")
     entries = [catalog.get(key) for key in ("linear", "quadratic", "exponential")]

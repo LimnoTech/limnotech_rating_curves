@@ -32,8 +32,9 @@ not the workbook's own typed coefficients. Groups `select()` understands:
 | `RatingCurveEntry`, `BdrcEntry`, `PolynomialEntry`, `ExponentialEntry` | One subclass per backend |
 | `save_posterior(fit, directory, sample_id)` | Write a posterior to ArviZ NetCDF |
 
-Also exported: `MODEL_KEYS`, `SPREADSHEET_FORM_KEYS`, `DEFAULT_KEYS`, `GROUPS`,
-`RATINGCURVE_KEYS`, `BDRC_KEYS`, `FORM_KEYS`.
+Also exported: `MODEL_KEYS`, `SPREADSHEET_FORM_KEYS`, `GROUPS`,
+`RATINGCURVE_KEYS`, `BDRC_KEYS`, `FORM_KEYS`. Which models `select(None)` returns is
+`settings.DEFAULT_MODEL_KEYS`.
 
 ## `ratingcurve.py` — the PyMC `ratingcurve` package
 

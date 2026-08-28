@@ -6,7 +6,8 @@ import pandas as pd
 
 from ..models import catalog
 from .. import settings
-from ..core import Sample, fit_metrics
+from ..core import Sample
+from .metrics import fit_metrics
 
 log = logging.getLogger(__name__)
 

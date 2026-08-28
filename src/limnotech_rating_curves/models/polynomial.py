@@ -5,7 +5,8 @@ import numpy as np
 import pandas as pd
 
 from .. import settings
-from ..core import FitResult, fit_metrics
+from ..core import Fit
+from ..model_selection.metrics import fit_metrics
 
 log = logging.getLogger(__name__)
 
@@ -264,8 +265,8 @@ def fit_polynomial(stage, discharge, degree: int = 2,
 
 def fit(sample, *, key: str, label: str, degree: int = 2, min_points: int = 4,
         enforce_min_points: bool = True, stage_range=None, level: float = 0.95,
-        **ignored) -> FitResult:
-    """Fit a polynomial rating and package it as a :class:`FitResult`.
+        **ignored) -> Fit:
+    """Fit a polynomial rating and package it as a :class:`Fit`.
 
     Mirrors the Bayesian backends' entry point so the catalog can treat every family
     the same way. Keyword arguments that only mean something to a sampler (``method``,
@@ -276,32 +277,32 @@ def fit(sample, *, key: str, label: str, degree: int = 2, min_points: int = 4,
     stage = frame["stage_ft"].to_numpy(float)
     discharge = frame["discharge_cfs"].to_numpy(float)
 
-    result = FitResult(key=key, label=label, family="polynomial", n=len(frame),
-                       status="skipped", reason="",
-                       config={"degree": degree, "method": "least_squares",
-                               "stage_range": None if stage_range is None
-                                              else list(stage_range),
-                               "interval": f"{level:.0%} prediction interval"})
+    fit = Fit(key=key, label=label, family="polynomial", n=len(frame),
+              status="skipped", reason="",
+              config={"degree": degree, "method": "least_squares",
+                      "stage_range": None if stage_range is None
+                                     else list(stage_range),
+                      "interval": f"{level:.0%} prediction interval"})
     if enforce_min_points and len(frame) < min_points:
-        result.reason = (f"{len(frame)} measurements, fewer than the {min_points} a "
-                         f"degree-{degree} fit needs")
-        return result
+        fit.reason = (f"{len(frame)} measurements, fewer than the {min_points} a "
+                      f"degree-{degree} fit needs")
+        return fit
     try:
         fitted = fit_polynomial(stage, discharge, degree=degree,
                                 stage_range=stage_range)
     except Exception as exc:  # noqa: BLE001
-        result.status = "failed"
-        result.reason = f"{type(exc).__name__}: {exc}"
-        return result
+        fit.status = "failed"
+        fit.reason = f"{type(exc).__name__}: {exc}"
+        return fit
 
-    result.status = "ok"
-    result.rating = fitted
-    result.curve = fitted.table(level=level)
-    result.predicted = fitted.predict(stage, clip=False)
-    result.metrics = fit_metrics(discharge, result.predicted)
-    result.config.update({
+    fit.status = "ok"
+    fit.rating = fitted
+    fit.curve = fitted.table(level=level)
+    fit.predicted = fitted.predict(stage, clip=False)
+    fit.metrics = fit_metrics(discharge, fit.predicted)
+    fit.config.update({
         "coefficients": [float(value) for value in fitted.coefficients],
         "r_squared": fitted.r_squared,
         "effective_range": list(fitted.effective_range),
         "turning_point": fitted.turning_point})
-    return result
+    return fit

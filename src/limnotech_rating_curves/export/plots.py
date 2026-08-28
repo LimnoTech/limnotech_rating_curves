@@ -3,22 +3,10 @@ from pathlib import Path
 
 import numpy as np
 
+from .. import settings
 from ..models import catalog
 
 log = logging.getLogger(__name__)
-
-#: How a published reference rating is drawn, everywhere.
-REFERENCE_STYLE = dict(color="black", linewidth=2.0, linestyle="--")
-
-#: Color for the part of a curve that sits outside the measured stage range. Every
-#: family is tabulated on a grid padded past both ends of the measurements
-#: (:func:`limnotech_rating_curves.core.padded_stage_grid`), so the curves are
-#: comparable end to end; this is what marks the part of them that no measurement
-#: supports.
-EXTRAPOLATION_COLOR = "#e08214"
-
-#: Legend text for that part.
-EXTRAPOLATION_LABEL = "extrapolated beyond the measurements"
 
 #: Plotly dash names to matplotlib linestyles, so a curve has the same shape in a
 #: figure as it does on the map. The catalog names the styles once, in Plotly's
@@ -70,7 +58,7 @@ def limit_discharge_axis(ax, discharge, log_discharge: bool = True):
 
 def draw_curve(ax, curve, measured_range, *, color, label=None, level=None,
                linewidth=2.2, linestyle="-", band_alpha=0.18, zorder=3,
-               extrapolation_color=EXTRAPOLATION_COLOR,
+               extrapolation_color=settings.PLOT_EXTRAPOLATION_COLOR,
                extrapolation_label=None, x="stage_ft"):
     """Draw one fitted curve, marking the part outside the measured range.
 
@@ -188,7 +176,8 @@ def plot_site(site, ax=None, *, level: float | None = None):
             (fit.curve["stage_ft"] < measured_range[0]).any()
             or (fit.curve["stage_ft"] > measured_range[1]).any())
     if extrapolated:
-        ax.plot([], [], color="0.4", ls=":", lw=2.2, label=EXTRAPOLATION_LABEL)
+        ax.plot([], [], color="0.4", ls=":", lw=2.2,
+                label=settings.PLOT_EXTRAPOLATION_LABEL)
 
     _overlay_external(ax, site)
 
@@ -447,7 +436,7 @@ def plot_log_log(rating, ax=None, *, zero_flow=None, level: float = 0.95):
     measured_head = tuple(edge - zero_flow for edge in sample.stage_range)
     draw_curve(ax, curve, measured_head, x="head_ft", color=rating.color,
                level=level, band_alpha=0.2, linewidth=2.0, label=rating.label,
-               extrapolation_label=EXTRAPOLATION_LABEL)
+               extrapolation_label=settings.PLOT_EXTRAPOLATION_LABEL)
 
     ax.plot(sample.stage_ft - zero_flow, sample.discharge_cfs, "o", color="black",
             ms=5, label="measurements")
@@ -697,7 +686,8 @@ def plot_rating_cloud(record, ax=None, *, rating=None, measurements=None,
     ax.figure.colorbar(scatter, ax=ax, label=color_by)
 
     if rating is not None and not rating.empty:
-        ax.plot(rating["stage_ft"], rating["discharge_cfs"], **REFERENCE_STYLE,
+        ax.plot(rating["stage_ft"], rating["discharge_cfs"],
+                **settings.PLOT_REFERENCE_STYLE,
                 zorder=4, label="published rating")
     if measurements is not None and not measurements.empty:
         ax.scatter(measurements["stage_ft"], measurements["discharge_cfs"], s=45,
@@ -767,7 +757,7 @@ def plot_rating_deviation(deviation, axes=None, *, figsize=(12, 8)):
 FIGURES_README = """\
 # Rating-curve figures
 
-The primary output of a batch run is the interactive map
+The primary output of a run over many sites is the interactive map
 (`output/rating_curves_map.html`); these static PNGs are written with `--png`.
 
 ## Layout

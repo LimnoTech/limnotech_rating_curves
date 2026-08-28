@@ -1,61 +1,28 @@
 import logging
-import os
+from collections.abc import Sequence
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
-from ..support import cache
-from ..evaluate import crossval
-from . import datum as datum_module, usgs
+from ..helpers import cache
+from ..model_selection import crossval
+from . import datum as datum_module, magl_spreadsheets, usgs
 from .. import settings
 from ..core import Sample
+from ..site import SiteRating
 from .usgs import gage_sample  # noqa: F401 - re-exported as the reference case
 
 log = logging.getLogger(__name__)
 
-# --- where the MAGL files live ----------------------------------------------
-
-MAGL_DATA_DIR = settings.DATA_DIR / "magl"
-
-#: Surveyed control-point elevation per station (NAVD88 feet).
-CONTROL_POINTS_CSV = MAGL_DATA_DIR / "magl_station_control_point_elevations.csv"
-
-#: Timestamped changes to those control-point elevations (sensor moves).
-SENSOR_MOVES_CSV = MAGL_DATA_DIR / "magl_changes_to_station_control_point_elevations.csv"
-
-#: The historical distance-to-surface record, as a pickle of per-station frames.
-SPREADSHEET_PICKLE = settings.DATA_DIR / "timeseries" / "magl_spreadsheet_timeseries.pkl"
-
-#: The site registry - clusters, co-located pairs, standalone gages.
-SITES_YAML = Path(os.environ.get("LRC_MAGL_SITES",
-                                 settings.PACKAGE_DIR / "data" / "magl_sites.yaml"))
-
-#: Column in the spreadsheet frames holding its own derived water-surface elevation,
-#: used only to measure the control-point offset - never as the stage a rating is
-#: fitted to.
-_SPREADSHEET_ELEVATION_COLUMN = "Water Elevation (NAVD88)"
-
-#: Largest acceptable gap between a discharge measurement and the stage reading
-#: matched to it.
-STAGE_MATCH_TOLERANCE = "3h"
-
-#: A stage reading this far below the lowest gauged stage is a sensor dropout, not
-#: real low water, and is discarded before taking a low-water reference.
-DROPOUT_BAND_FT = 10.0
-
-#: MAGL stage begins around here; USGS visits older than this cannot be matched.
-MAGL_RECORD_START = "2024-08-01"
 
 _registry_cache: dict = {}
 _survey_cache: dict = {}
-_spreadsheet_cache: dict = {}
 
 
 def _discharge_csv(name: str) -> Path:
-    """Locate one of the MAGL discharge exports, in the data dir or beside the repo."""
-    candidates = [MAGL_DATA_DIR / name, settings.DATA_DIR / name,
-                  settings.PACKAGE_DIR.parent / name]
+    """Locate one of the MAGL discharge exports, under the data dir or beside it."""
+    candidates = [settings.MAGL_DATA_DIR / name, settings.DATA_DIR / name,
+                  Path(name)]
     for candidate in candidates:
         if candidate.exists():
             return candidate
@@ -94,52 +61,110 @@ def discharge_report_csv_path() -> Path:
 # the site registry
 # ---------------------------------------------------------------------------
 
+#: The registry's files, and the columns each one must carry.
+REGISTRY_FILES = {
+    "clusters.csv": ("cluster", "name"),
+    "colocated_pairs.csv": ("station", "gage"),
+    "standalone_gages.csv": ("gage", "cluster"),
+    "special_stations.csv": ("station", "pickle", "entry_key"),
+}
+
+
+def _registry_table(directory: Path, name: str) -> pd.DataFrame:
+    """One registry CSV, read as text so gage ids keep their leading zeros.
+
+    A file that is not there is an empty table rather than an error: a deployment
+    with no co-located pairs is a legitimate deployment, and the sections are
+    independent.
+    """
+    path = directory / name
+    if not path.exists():
+        log.debug("site registry: no %s in %s, treating it as empty", name, directory)
+        return pd.DataFrame(columns=list(REGISTRY_FILES[name]))
+    frame = pd.read_csv(path, dtype=str, comment="#").fillna("")
+    frame.columns = [str(column).strip() for column in frame.columns]
+    missing = [column for column in REGISTRY_FILES[name]
+               if column not in frame.columns]
+    if missing:
+        raise ValueError(f"{path} is missing column(s) {', '.join(missing)}; "
+                         f"expected {', '.join(REGISTRY_FILES[name])}")
+    for column in frame.columns:
+        frame[column] = frame[column].str.strip()
+    return frame[frame[REGISTRY_FILES[name][0]] != ""]
+
+
+def _gage_id(value: str, source: Path) -> str:
+    """A gage id, warning when a spreadsheet has eaten its leading zero.
+
+    Every USGS site id in this network begins with a zero, so one that does not has
+    almost certainly been through a spreadsheet that read the column as a number.
+    Warned about rather than repaired, because guessing how many zeros were lost
+    would be worse than saying so.
+    """
+    identifier = str(value).strip()
+    if identifier and identifier.isdigit() and not identifier.startswith("0"):
+        log.warning("gage id %r in %s has no leading zero - a spreadsheet editor "
+                    "strips them when it reads the column as a number. Restore it "
+                    "and keep the column formatted as text", identifier, source.name)
+    return identifier
+
+
 def site_registry(path=None, refresh: bool = False) -> dict:
-    """Load the MAGL site registry from YAML.
+    """Load the MAGL site registry from its CSV files.
 
     A *cluster* is a stream-network group labeled by the station-name prefix, so
     ``SR-08_WL`` belongs to cluster ``SR``. USGS gages inherit a cluster either
-    from a co-located station or from an explicit mapping in the file.
+    from a co-located station or from an explicit mapping in
+    ``standalone_gages.csv``.
 
     Parameters
     ----------
     path : path-like, optional
-        The YAML file. Defaults to ``SITES_YAML``, which the ``LRC_MAGL_SITES``
-        environment variable can point elsewhere.
+        The directory holding the registry CSVs - see ``REGISTRY_FILES`` for the
+        files and their columns. Defaults to ``settings.MAGL_SITES_DIR``, which the
+        ``LRC_MAGL_SITES_DIR`` environment variable can point elsewhere.
     refresh : bool, default False
-        Re-read the file instead of using the in-process copy.
+        Re-read the files instead of using the in-process copy.
 
     Returns
     -------
     dict
         ``clusters`` (metadata per label), ``colocated`` (``{station: gage}``),
-        ``standalone_gages`` (``{gage: cluster}``) and ``special_stations``.
+        ``standalone_gages`` (``{gage: cluster}``) and ``special_stations``
+        (``{station: (pickle, entry_key)}``).
+
+    Raises
+    ------
+    FileNotFoundError
+        When the directory itself is absent - which usually means the data has not
+        been placed where ``settings.DATA_DIR`` points.
     """
-    import yaml
-    path = Path(SITES_YAML if path is None else path)
-    key = str(path)
+    directory = Path(settings.MAGL_SITES_DIR if path is None else path)
+    key = str(directory)
     if key in _registry_cache and not refresh:
         return _registry_cache[key]
+    if not directory.is_dir():
+        raise FileNotFoundError(
+            f"no MAGL site registry at {directory}. It holds "
+            f"{', '.join(REGISTRY_FILES)}; point LRC_MAGL_SITES_DIR or LRC_DATA_DIR "
+            f"at where the data actually is")
 
-    with open(path, "r", encoding="utf-8") as handle:
-        raw = yaml.safe_load(handle) or {}
+    clusters = _registry_table(directory, "clusters.csv")
+    pairs = _registry_table(directory, "colocated_pairs.csv")
+    standalone = _registry_table(directory, "standalone_gages.csv")
+    special = _registry_table(directory, "special_stations.csv")
 
-    def as_id(value) -> str:
-        """A gage id as a string, warning if the YAML lost its leading zero."""
-        if isinstance(value, int):
-            log.warning("gage id %r is an unquoted integer in %s - quote it so "
-                        "leading zeros survive", value, path.name)
-        return str(value)
-
+    pairs_path = directory / "colocated_pairs.csv"
+    standalone_path = directory / "standalone_gages.csv"
     registry = {
-        "clusters": dict(raw.get("clusters", {}) or {}),
-        "colocated": {str(pair["station"]): as_id(pair["gage"])
-                      for pair in raw.get("colocated_pairs", [])},
-        "standalone_gages": {as_id(row["gage"]): str(row["cluster"])
-                             for row in raw.get("standalone_gages", [])},
-        "special_stations": {str(row["station"]): (str(row["pickle"]),
-                                                   row["entry_key"])
-                             for row in raw.get("special_stations", [])},
+        "clusters": {row["cluster"]: {"name": row["name"]}
+                     for _, row in clusters.iterrows()},
+        "colocated": {row["station"]: _gage_id(row["gage"], pairs_path)
+                      for _, row in pairs.iterrows()},
+        "standalone_gages": {_gage_id(row["gage"], standalone_path): row["cluster"]
+                             for _, row in standalone.iterrows()},
+        "special_stations": {row["station"]: (row["pickle"], int(row["entry_key"]))
+                             for _, row in special.iterrows()},
     }
     _registry_cache[key] = registry
     return registry
@@ -281,7 +306,7 @@ def control_point_elevations(path=None) -> dict:
     Parameters
     ----------
     path : path-like, optional
-        The CSV. Defaults to ``CONTROL_POINTS_CSV``.
+        The CSV. Defaults to ``settings.MAGL_CONTROL_POINTS_CSV``.
 
     Returns
     -------
@@ -289,7 +314,7 @@ def control_point_elevations(path=None) -> dict:
         ``{station name with _WL: elevation in NAVD88 feet}``. The CSV stores bare
         station names; ``_WL`` is appended so the keys match sensor names.
     """
-    path = Path(CONTROL_POINTS_CSV if path is None else path)
+    path = Path(settings.MAGL_CONTROL_POINTS_CSV if path is None else path)
     key = f"control_points:{path}"
     if key not in _survey_cache:
         table = pd.read_csv(path)
@@ -311,7 +336,7 @@ def sensor_moves(path=None) -> dict:
     Parameters
     ----------
     path : path-like, optional
-        The CSV. Defaults to ``SENSOR_MOVES_CSV``.
+        The CSV. Defaults to ``settings.MAGL_SENSOR_MOVES_CSV``.
 
     Returns
     -------
@@ -319,7 +344,7 @@ def sensor_moves(path=None) -> dict:
         ``{station name with _WL: [(timestamp, change in feet), ...]}``, each list
         in time order.
     """
-    path = Path(SENSOR_MOVES_CSV if path is None else path)
+    path = Path(settings.MAGL_SENSOR_MOVES_CSV if path is None else path)
     key = f"moves:{path}"
     if key not in _survey_cache:
         table = pd.read_csv(path)
@@ -372,7 +397,7 @@ def reference_elevation(station: str, index) -> pd.Series:
     elevations = control_point_elevations()
     if station not in elevations:
         raise KeyError(f"no surveyed control-point elevation for {station!r} in "
-                       f"{CONTROL_POINTS_CSV.name}")
+                       f"{settings.MAGL_CONTROL_POINTS_CSV.name}")
     return datum_module.stepwise_reference_elevation(
         index, elevations[station], sensor_moves().get(station, []))
 
@@ -408,7 +433,7 @@ def sensor_elevation(station: str, index, *, units: str = "ft",
     elevation = reference_elevation(station, index)
     if sensor_datum:
         try:
-            elevation = elevation - control_point_offset(station)
+            elevation = elevation - magl_spreadsheets.control_point_offset(station)
         except KeyError:
             log.info("no control-point offset for %s; leaving the sensor elevation "
                      "on the control-point datum", station)
@@ -417,63 +442,10 @@ def sensor_elevation(station: str, index, *, units: str = "ft",
 
 
 # ---------------------------------------------------------------------------
-# the distance record: spreadsheet + pagaia
+# the pagaia database
 # ---------------------------------------------------------------------------
 
-def _spreadsheet_frames(path=None) -> dict:
-    """Per-station frames from the spreadsheet pickle. Memoized; the pickle is large."""
-    path = Path(SPREADSHEET_PICKLE if path is None else path)
-    key = str(path)
-    if key not in _spreadsheet_cache:
-        payload = pd.read_pickle(path)
-        _spreadsheet_cache[key] = {
-            element[1]: element[2] for element in payload
-            if isinstance(element, tuple) and len(element) == 3 and element[0] == "WL"}
-    return _spreadsheet_cache[key]
-
-
-def _clean_series(series: pd.Series) -> pd.Series:
-    """tz-naive, sorted, de-duplicated float series at one datetime resolution."""
-    series = series.dropna().astype(float).copy()
-    series.index = datum_module._as_naive_index(series.index)
-    return series[~series.index.duplicated(keep="first")].sort_index()
-
-
-def spreadsheet_distance_ft(station: str, path=None,
-                            quality_controlled: bool = True) -> pd.Series:
-    """Distance-to-surface from the spreadsheet record, in feet.
-
-    Parameters
-    ----------
-    station : str
-        Station name with ``_WL``.
-    path : path-like, optional
-        The pickle. Defaults to ``SPREADSHEET_PICKLE``.
-    quality_controlled : bool, default True
-        Keep only rows the spreadsheet flagged as passing QA/QC.
-
-    Returns
-    -------
-    pandas.Series
-        Native (sub-daily) resolution, feet. Empty if the station is not in the
-        pickle.
-    """
-    frames = _spreadsheet_frames(path)
-    if station not in frames:
-        return pd.Series(dtype=float, name=station)
-    frame = frames[station]
-    distance = frame["distance"]
-    if quality_controlled and "QAQC" in frame.columns:
-        distance = distance[frame["QAQC"] == 0]
-    return _clean_series(distance).rename(station)
-
-
-#: Which pagaia environment the MAGL stations are read from. Always production - it is
-#: the database of record for the MAGL network, and staging is not to be read from.
-PAGAIA_ENVIRONMENT = "production"
-
-
-def pagaia_session(environment: str = PAGAIA_ENVIRONMENT):
+def pagaia_session(environment: str = settings.PAGAIA_ENVIRONMENT):
     """Open a pagaia session on the environment the MAGL network lives in.
 
     A convenience for the MAGL loaders below, which each need a session and would
@@ -603,7 +575,8 @@ def distance_record_ft(station: str, start=None, end=None,
         Station name with ``_WL``.
     start, end : str or datetime, optional
         Window for the pagaia part. Defaults to the tail the spreadsheet does not
-        cover: from its last reading (or `MAGL_RECORD_START` when it has none) to
+        cover: from its last reading (or ``settings.MAGL_RECORD_START`` when it
+        has none) to
         today. pagaia's API needs both ends, so leaving them out used to skip the
         database entirely and silently end the record with the spreadsheet.
     quality_controlled : bool, default True
@@ -616,11 +589,11 @@ def distance_record_ft(station: str, start=None, end=None,
     pandas.Series
         Native resolution, feet.
     """
-    spreadsheet = spreadsheet_distance_ft(station,
+    spreadsheet = magl_spreadsheets.distance_ft(station,
                                          quality_controlled=quality_controlled)
     if start is None:
         start = (spreadsheet.index.max() if not spreadsheet.empty
-                 else pd.Timestamp(MAGL_RECORD_START))
+                 else pd.Timestamp(settings.MAGL_RECORD_START))
     if end is None:
         end = pd.Timestamp.now().normalize() + pd.Timedelta(days=1)
     database = pagaia_distance_ft(station, start, end, refresh=refresh)
@@ -632,7 +605,8 @@ def distance_record_ft(station: str, start=None, end=None,
     # inside the spreadsheet's span lets pagaia fill gaps the QA/QC flag opened, so
     # the same instant reads differently depending on the window requested.
     database = database[database.index > spreadsheet.index.max()]
-    return _clean_series(spreadsheet.combine_first(database)).rename(station)
+    return magl_spreadsheets.clean_series(
+        spreadsheet.combine_first(database)).rename(station)
 
 
 def water_surface_elevation_ft(station: str, start=None, end=None, *,
@@ -654,7 +628,7 @@ def water_surface_elevation_ft(station: str, start=None, end=None, *,
         Also subtract the station's control-point offset, putting the result on the
         sensor datum - the same tie the spreadsheet's own elevation column uses,
         and the one to use for anything that has to agree with it. Set False to
-        stay on the raw control-point datum. See :func:`control_point_offset`.
+        stay on the raw control-point datum. See ``magl_spreadsheets.control_point_offset``.
     quality_controlled : bool, default True
         Apply the spreadsheet's QA/QC flag.
     refresh : bool, default False
@@ -674,14 +648,15 @@ def water_surface_elevation_ft(station: str, start=None, end=None, *,
     elevation = datum_module.distance_to_stage(distance, reference)
     if sensor_datum:
         try:
-            elevation = elevation - control_point_offset(station)
+            elevation = elevation - magl_spreadsheets.control_point_offset(station)
         except KeyError:
             log.info("no control-point offset for %s; leaving stage on the "
                      "control-point datum", station)
     return elevation.rename(station)
 
 
-def stage_at_times(station: str, times, tolerance: str = STAGE_MATCH_TOLERANCE,
+def stage_at_times(station: str, times,
+                   tolerance: str = settings.MAGL_STAGE_MATCH_TOLERANCE,
                    refresh: bool = False, **kwargs) -> pd.DataFrame:
     """Match a station's stage record to the instants discharge was measured.
 
@@ -718,108 +693,6 @@ def stage_at_times(station: str, times, tolerance: str = STAGE_MATCH_TOLERANCE,
                         (station, tuple(stamp.isoformat() for stamp in stamps),
                          tolerance, tuple(sorted(kwargs.items()))),
                         build, refresh)
-
-
-# ---------------------------------------------------------------------------
-# the control-point offset (control-point datum vs sensor datum)
-# ---------------------------------------------------------------------------
-
-#: An offset larger than this is not a plausible radar-to-benchmark gap and means
-#: the survey record or the spreadsheet record for that station needs review.
-OFFSET_SUSPECT_FT = 10.0
-
-
-def control_point_offsets(path=None, quality_controlled: bool = True) -> pd.DataFrame:
-    """Per-station gap between the surveyed control point and the sensor's own datum.
-
-    The surveyed control point is a benchmark; the radar measures from its own
-    face. The constant gap between them is what separates the two datums, and it is
-    recoverable because the spreadsheet carries both the distance reading and its
-    own derived water-surface elevation: their sum is the sensor's reference
-    elevation, and the offset is the control point minus that.
-
-    The sum is taken over the window *before the first sensor move* (the whole
-    record for a station that never moved), because a move changes the reference and
-    would otherwise smear the estimate.
-
-    Parameters
-    ----------
-    path : path-like, optional
-        The spreadsheet pickle.
-    quality_controlled : bool, default True
-        Apply the spreadsheet's QA/QC flag.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Indexed by station, with ``control_point_ft``, ``sensor_reference_ft``,
-        ``offset_ft``, ``n_baseline`` and ``suspect`` - the last flagging an offset
-        larger than ``OFFSET_SUSPECT_FT``.
-    """
-    key = f"offsets:{path}:{quality_controlled}"
-    if key in _survey_cache:
-        return _survey_cache[key]
-
-    elevations = control_point_elevations()
-    moves = sensor_moves()
-    rows = {}
-    for station, frame in _spreadsheet_frames(path).items():
-        if (station not in elevations
-                or _SPREADSHEET_ELEVATION_COLUMN not in frame.columns):
-            continue
-        sensor_reference = frame["distance"] + frame[_SPREADSHEET_ELEVATION_COLUMN]
-        if quality_controlled and "QAQC" in frame.columns:
-            sensor_reference = sensor_reference[frame["QAQC"] == 0]
-        sensor_reference = _clean_series(sensor_reference)
-        if sensor_reference.empty:
-            continue
-        events = moves.get(station, [])
-        baseline = (sensor_reference[sensor_reference.index < events[0][0]]
-                    if events else sensor_reference)
-        if baseline.empty:
-            baseline = sensor_reference
-        reference = float(baseline.median())
-        control_point = elevations[station]
-        rows[station] = {
-            "control_point_ft": control_point,
-            "sensor_reference_ft": reference,
-            "offset_ft": control_point - reference,
-            "n_baseline": int(len(baseline)),
-            "suspect": abs(control_point - reference) > OFFSET_SUSPECT_FT,
-        }
-    table = pd.DataFrame.from_dict(rows, orient="index").sort_index()
-    table.index.name = "station"
-    _survey_cache[key] = table
-    return table
-
-
-def control_point_offset(station: str, **kwargs) -> float:
-    """One station's control-point offset, in feet.
-
-    Parameters
-    ----------
-    station : str
-        Station name with ``_WL``.
-    **kwargs
-        Forwarded to :func:`control_point_offsets`.
-
-    Returns
-    -------
-    float
-        Feet to subtract from a control-point-datum elevation to reach the sensor
-        datum.
-
-    Raises
-    ------
-    KeyError
-        If the station is not in the spreadsheet record, so the offset cannot be
-        measured.
-    """
-    offsets = control_point_offsets(**kwargs)
-    if station not in offsets.index:
-        raise KeyError(f"no control-point offset for {station!r} - it has no "
-                       f"spreadsheet record to measure one from")
-    return float(offsets.loc[station, "offset_ft"])
 
 
 # ---------------------------------------------------------------------------
@@ -944,7 +817,7 @@ def list_sensors(min_points: int = 3, source: str = "report") -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def sensor_sample(sensor: str, *, stage_datum="lowest", source: str = "report",
-                  tolerance: str = STAGE_MATCH_TOLERANCE,
+                  tolerance: str = settings.MAGL_STAGE_MATCH_TOLERANCE,
                   refresh: bool = False) -> Sample:
     """MAGL discharge against MAGL stage for one sensor - the rating you would use.
 
@@ -1038,7 +911,8 @@ def _fill_report_stage(station, sensor, report, tolerance, refresh):
     return filled, note
 
 
-def colocated_sample(station: str, gage=None, *, tolerance: str = STAGE_MATCH_TOLERANCE,
+def colocated_sample(station: str, gage=None, *,
+                     tolerance: str = settings.MAGL_STAGE_MATCH_TOLERANCE,
                      refresh: bool = False) -> Sample:
     """USGS field discharge against the co-located MAGL sensor's stage.
 
@@ -1078,7 +952,7 @@ def colocated_sample(station: str, gage=None, *, tolerance: str = STAGE_MATCH_TO
     gage = colocated_gage(base) if gage is None else str(gage)
     if gage is None:
         raise ValueError(f"{station!r} has no co-located USGS gage in "
-                         f"{SITES_YAML.name}")
+                         "colocated_pairs.csv")
     gage = usgs.normalize_site_id(gage)
 
     measured = usgs.measurements(gage, refresh=refresh)
@@ -1089,7 +963,7 @@ def colocated_sample(station: str, gage=None, *, tolerance: str = STAGE_MATCH_TO
     measured = measured.dropna(subset=["time"])
     # MAGL stage only exists from about MAGL_RECORD_START; older USGS visits can
     # never be matched, so drop them rather than fetch years of stage for nothing.
-    measured = measured[measured["time"] >= pd.Timestamp(MAGL_RECORD_START)]
+    measured = measured[measured["time"] >= pd.Timestamp(settings.MAGL_RECORD_START)]
 
     info = usgs.site_info(gage, refresh=refresh)
     if gage not in info.index:
@@ -1107,7 +981,7 @@ def colocated_sample(station: str, gage=None, *, tolerance: str = STAGE_MATCH_TO
         return Sample(stage_ft=[], discharge_cfs=[], site_id=station_wl,
                       source="colocated",
                       skipped=(f"no USGS measurements at {gage} since "
-                               f"{MAGL_RECORD_START}"))
+                               f"{settings.MAGL_RECORD_START}"))
 
     matched = stage_at_times(station_wl, measured["time"], tolerance=tolerance,
                              refresh=refresh)
@@ -1216,10 +1090,12 @@ def cross_validate(sample, **kwargs):
 
 #: Sheet in a ``flow@<sensor>.xlsx`` workbook holding the paired measurements the
 #: spreadsheet's own chart trendline is fitted to.
-RATING_CURVE_SHEET = "Rating Curve"
+settings.MAGL_RATING_CURVE_SHEET = "Rating Curve"
 
 
-def rating_curve_sheet(path, sheet: str = RATING_CURVE_SHEET) -> pd.DataFrame:
+def rating_curve_sheet(path,
+                       sheet: str = settings.MAGL_RATING_CURVE_SHEET
+                       ) -> pd.DataFrame:
     """The paired measurements behind a flow workbook's rating curve.
 
     A ``flow@<sensor>.xlsx`` workbook carries one sheet of the measurements its chart
@@ -1267,7 +1143,8 @@ def rating_curve_sheet(path, sheet: str = RATING_CURVE_SHEET) -> pd.DataFrame:
     return tidy.sort_values("stage_ft").reset_index(drop=True)
 
 
-def flow_sheet_sample(path, sheet: str = RATING_CURVE_SHEET, *, stage_datum=None,
+def flow_sheet_sample(path, sheet: str = settings.MAGL_RATING_CURVE_SHEET, *,
+                      stage_datum=None,
                       sensor=None) -> Sample:
     """A :class:`~limnotech_rating_curves.core.Sample` from a flow workbook's sheet.
 
@@ -1296,3 +1173,137 @@ def flow_sheet_sample(path, sheet: str = RATING_CURVE_SHEET, *, stage_datum=None
                      stage_label=("water-surface elevation (ft NAVD88)"
                                   if stage_datum is None else None),
                      datum_note=f"{path.name} sheet {sheet!r}")
+
+
+def _site_matches(tokens: Sequence[str] | None, *, group: str | None = None,
+                  gage: str | None = None,
+                  station: str | None = None) -> bool:
+    """Does a candidate site match any selection token? No tokens matches everything."""
+    if not tokens:
+        return True
+    for raw in tokens:
+        token = str(raw).strip()
+        if group and token.lower() == str(group).lower():
+            return True
+        if gage and (token == gage or usgs.normalize_site_id(token) == gage):
+            return True
+        if station and token.lower().replace("_wl", "") == str(station).lower():
+            return True
+    return False
+
+
+def assemble_magl_sites(sites: Sequence[str] | None = None,
+                        sources: Sequence[str] | None = None,
+                        min_points: int = 3,
+                        years: int = 5,
+                        refresh: bool = False) -> list[SiteRating]:
+    """Build a :class:`SiteRating` for each selected MAGL-network site, unfitted.
+
+    Only the selected sites are fetched, so a targeted run stays fast.
+
+    Parameters
+    ----------
+    sites : sequence of str, optional
+        Selection tokens: a MAGL sensor (``"SBR-09"``), a co-located station
+        (``"SR-08"``), a cluster (``"SR"``), or a USGS gage id (``"04176356"``).
+        ``None`` takes every site.
+    sources : sequence of str, optional
+        Restrict to these sample sources (see ``settings.MAGL_SOURCES``).
+    min_points : int, default 3
+        Fewest discharge measurements before a MAGL sensor is included.
+    years : int, default 5
+        How far back to take a USGS gage's measurements. A channel changes, so an old
+        gaging describes a rating that no longer applies. A gage with nothing this
+        recent is left out.
+    refresh : bool, default False
+        Refetch instead of using the cache.
+
+    Returns
+    -------
+    list of SiteRating
+        With samples and coordinates filled in and ``fits`` still empty.
+    """
+    from . import pagaia
+
+    wanted = lambda source: (not sources) or (source in sources)
+
+    gages = all_gages()
+    selected_gages = [gage for gage in gages if wanted("usgs_gage")
+                      and _site_matches(sites, group=gage_cluster(gage),
+                                        gage=gage)]
+    selected_pairs = [(station, gage) for station, gage in colocated_pairs()
+                      if wanted("colocated")
+                      and _site_matches(sites, group=station_cluster(station),
+                                        gage=gage, station=station)]
+    selected_sensors = [sensor for sensor in list_sensors(min_points).index
+                        if wanted("magl")
+                        and _site_matches(sites, group=station_cluster(sensor),
+                                          station=sensor)]
+
+    needed_gages = set(selected_gages) | {gage for _, gage in selected_pairs}
+    gage_coordinates = usgs.coordinates(sorted(needed_gages), refresh=refresh) \
+        if needed_gages else {}
+    gage_names = {}
+    if needed_gages:
+        info = usgs.site_info(sorted(needed_gages), refresh=refresh)
+        gage_names = {gage: str(row.get("station_name") or "")
+                      for gage, row in info.iterrows()}
+
+    station_names = ([f"{sensor}_WL" for sensor in selected_sensors]
+                     + [f"{station}_WL" for station, _ in selected_pairs])
+    station_coordinates = {}
+    if station_names:
+        try:
+            station_coordinates = pagaia.station_coordinates(
+                pagaia_stations(sorted(set(station_names))))
+        except Exception as exc:  # noqa: BLE001 - pagaia down, off VPN, or not installed
+            log.warning("MAGL station coordinates unavailable (%s: %s); those sites "
+                        "will fall back to their gage's position or be skipped",
+                        type(exc).__name__, exc)
+
+    assembled = []
+
+    end = pd.Timestamp.today()
+    start = end - pd.DateOffset(years=years)
+
+    for gage in selected_gages:
+        sample = usgs.gage_sample(gage, start=start.date().isoformat(),
+                                  end=end.date().isoformat(), refresh=refresh)
+        if not len(sample):
+            log.info("usgs_gage:%s: no measurement in the last %d years, left out",
+                     gage, years)
+            continue
+        assembled.append(SiteRating(
+            sample_id=f"usgs_gage:{gage}", source="usgs_gage",
+            label=f"USGS {gage} {gage_names.get(gage, '')}".strip(), sample=sample,
+            gage=gage, group=gage_cluster(gage),
+            coords=gage_coordinates.get(gage)))
+
+    for station, gage in selected_pairs:
+        try:
+            sample = colocated_sample(station, gage, refresh=refresh)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("co-located %s could not be assembled: %s", station, exc)
+            continue
+        assembled.append(SiteRating(
+            sample_id=f"colocated:{station}", source="colocated",
+            label=f"{station} MAGL stage vs USGS {gage} discharge", sample=sample,
+            station=f"{station}_WL", gage=gage,
+            group=station_cluster(station),
+            coords=(station_coordinates.get(f"{station}_WL")
+                    or gage_coordinates.get(gage))))
+
+    for sensor in selected_sensors:
+        try:
+            sample = sensor_sample(sensor, refresh=refresh)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("MAGL %s could not be assembled: %s", sensor, exc)
+            continue
+        assembled.append(SiteRating(
+            sample_id=f"magl:{sensor}", source="magl",
+            label=f"{sensor} (MAGL discharge)", sample=sample,
+            station=f"{sensor}_WL", group=station_cluster(sensor),
+            coords=station_coordinates.get(f"{sensor}_WL")))
+
+    return assembled
+

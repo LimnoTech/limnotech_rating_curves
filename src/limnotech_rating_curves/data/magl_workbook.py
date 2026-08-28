@@ -7,26 +7,9 @@ import numpy as np
 import pandas as pd
 
 from .. import settings
-from ..core import fit_metrics
+from ..model_selection.metrics import fit_metrics
 
 log = logging.getLogger(__name__)
-
-#: Where the field workbooks live, one folder per cluster then one per sensor.
-WORKBOOK_ROOT = Path(settings.REPO_DIR / "magl_curve_data")
-
-#: Rows of a summary sheet that hold the banner, the header, the coefficients and
-#: the gauging visits. Nothing a rating needs is below this, and stopping here is
-#: what keeps the 60,000-row 'water elevation' sheet from ever being parsed.
-SUMMARY_ROWS = 25
-
-#: Widest spread across visits in the elevation tying the stage axis to the distance
-#: axis before that tie is called inconsistent. A radar that was moved mid-record
-#: does not have one tie.
-DATUM_TIE_TOLERANCE_FT = 0.5
-
-#: Largest relative disagreement tolerated between the re-evaluated equation and the
-#: workbook's own Estimated Discharge column.
-EQUATION_CHECK_TOLERANCE = 1e-6
 
 #: Characters a translated formula may contain. Anything else means the formula uses
 #: a construct this module does not model, and it is refused rather than evaluated.
@@ -181,7 +164,7 @@ def workbook_paths(root=None) -> dict:
     Parameters
     ----------
     root : path-like, optional
-        The ``magl_curve_data`` tree. Defaults to ``WORKBOOK_ROOT``.
+        The ``magl_curve_data`` tree. Defaults to ``settings.MAGL_WORKBOOK_ROOT``.
 
     Returns
     -------
@@ -189,7 +172,7 @@ def workbook_paths(root=None) -> dict:
         ``{sensor: path}``, sorted. Excel lock files (``~$…``) and the superseded
         copies under ``level_data_before_…`` are left out.
     """
-    root = Path(WORKBOOK_ROOT if root is None else root)
+    root = Path(settings.MAGL_WORKBOOK_ROOT if root is None else root)
     found = {}
     for path in sorted(root.glob("**/flow@*.xlsx")):
         if path.name.startswith("~$") or "level_data_before" in str(path):
@@ -336,7 +319,7 @@ def _verify(rating, visits, input_letter, estimated_letter) -> bool:
         return False
     computed = rating.discharge(inputs[usable].to_numpy())
     return bool(np.allclose(computed, expected[usable].to_numpy(),
-                            rtol=EQUATION_CHECK_TOLERANCE, atol=1e-9))
+                            rtol=settings.WORKBOOK_EQUATION_CHECK_TOLERANCE, atol=1e-9))
 
 
 def datum_tie(visits, rating_curve, input_letter) -> tuple:
@@ -451,8 +434,8 @@ def stored_equation(sensor, path=None) -> WorkbookRating:
         return WorkbookRating(sensor=sensor, path=path,
                               note="no summary sheet with a control-point banner")
 
-    formulas = _grid(path, summary, SUMMARY_ROWS, data_only=False)
-    values = _grid(path, summary, SUMMARY_ROWS, data_only=True)
+    formulas = _grid(path, summary, settings.WORKBOOK_SUMMARY_ROWS, data_only=False)
+    values = _grid(path, summary, settings.WORKBOOK_SUMMARY_ROWS, data_only=True)
     header_row, headers = _header(formulas)
     if header_row is None:
         return WorkbookRating(sensor=sensor, path=path,
@@ -490,7 +473,7 @@ def stored_equation(sensor, path=None) -> WorkbookRating:
         if elevation is None:
             rating.note = ("no visit ties the stage axis to the distance axis, so "
                            "the equation cannot be drawn against stage")
-        elif spread > DATUM_TIE_TOLERANCE_FT:
+        elif spread > settings.WORKBOOK_DATUM_TIE_TOLERANCE_FT:
             log.warning("%s: the stage-to-distance tie varies by %.2f ft across "
                         "visits; the drawn curve assumes the mean, %.2f ft",
                         sensor, spread, elevation)
@@ -554,8 +537,8 @@ def status(root=None) -> pd.DataFrame:
         rows.append({
             "sensor": sensor,
             "cluster": sensor.split("-")[0],
-            "file": str(Path(path).relative_to(Path(WORKBOOK_ROOT if root is None
-                                                    else root))),
+            "file": str(Path(path).relative_to(
+                Path(settings.MAGL_WORKBOOK_ROOT if root is None else root))),
             "n_points": 0 if measurements is None else len(measurements),
             "stage_min": None if measurements is None or measurements.empty
                          else round(float(measurements["stage_ft"].min()), 2),

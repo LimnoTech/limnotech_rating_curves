@@ -8,27 +8,6 @@ from .. import settings
 
 log = logging.getLogger(__name__)
 
-#: How much headroom ``stage_datum="lowest"`` leaves below the stage of zero flow, as
-#: a fraction of the observed stage range.
-#:
-#: The margin exists because of a hard constraint, not as a matter of taste. A rating
-#: model estimates the **stage of zero flow** below the lowest measurement, and the
-#: power-law implementation restricts that parameter to ``[0, min(stage))``. Two ways
-#: to get it wrong, and this constant avoids both:
-#:
-#: * Reference *at* the lowest measurement and the interval collapses to nothing - the
-#:   parameter has nowhere to live and the fit dies at initialization.
-#: * Reference so that the true zero flow lands at **0**, the interval's lower bound,
-#:   and it dies too. The truncated normal's unconstrained transform sends that bound
-#:   to negative infinity, so the optimizer walks off to NaN chasing it.
-#:
-#: The second is why the margin is measured from the *estimated* stage of zero flow
-#: rather than from the lowest measurement: any fixed offset below the lowest
-#: measurement is exactly wrong for the data whose zero flow happens to sit there.
-#: Measuring from the estimate puts the fitted parameter in the interior of its range
-#: for any data. See :meth:`StageDatum.lowest_observed`.
-LOWEST_MARGIN_FRACTION = 0.10
-
 
 @dataclass
 class ConvertedStage:
@@ -96,7 +75,7 @@ class StageDatum:
         For ``kind="lowest"``: how much headroom to leave below the stage of zero
         flow, as a fraction of the observed stage range. See
         :meth:`lowest_observed` for what the margin is measured from and
-        :data:`LOWEST_MARGIN_FRACTION` for why it is not zero.
+        ``settings.LOWEST_MARGIN_FRACTION`` for why it is not zero.
     """
 
     kind: str = "none"
@@ -104,7 +83,7 @@ class StageDatum:
     series: object = None
     name: str = ""
     label: str = ""
-    margin_fraction: float = LOWEST_MARGIN_FRACTION
+    margin_fraction: float = settings.LOWEST_MARGIN_FRACTION
 
     @classmethod
     def none(cls) -> "StageDatum":
@@ -167,7 +146,7 @@ class StageDatum:
                    label="USGS gage height (ft)")
 
     @classmethod
-    def lowest_observed(cls, margin_fraction: float = LOWEST_MARGIN_FRACTION
+    def lowest_observed(cls, margin_fraction: float = settings.LOWEST_MARGIN_FRACTION
                         ) -> "StageDatum":
         """Reference stage to a little below where the flow would reach zero.
 
@@ -185,14 +164,14 @@ class StageDatum:
 
         Both leave the lowest measurement above zero, which the models require. The
         first also keeps the offset off the boundary of its range, where the sampler
-        diverges - see :data:`LOWEST_MARGIN_FRACTION` for why that distinction is
+        diverges - see ``settings.LOWEST_MARGIN_FRACTION`` for why that distinction is
         not cosmetic.
 
         Parameters
         ----------
         margin_fraction : float, optional
             Fraction of the observed stage range to leave as headroom. Defaults to
-            :data:`LOWEST_MARGIN_FRACTION`.
+            ``settings.LOWEST_MARGIN_FRACTION``.
 
         Returns
         -------

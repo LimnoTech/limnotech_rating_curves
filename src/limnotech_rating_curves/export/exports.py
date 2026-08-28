@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import settings
-from .core import Metrics
+from .. import settings
+from ..model_selection.metrics import Metrics
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def canonical_model_key(key) -> str:
         The canonical key, or `key` unchanged when the catalog does not know it -
         an unregistered model is still exportable.
     """
-    from .models import catalog
+    from ..models import catalog
     return catalog.LEGACY_KEYS.get(str(key), str(key))
 
 
@@ -94,16 +94,16 @@ class FittedRating:
     """The estimator surface a manifest needs, over a bare fit record.
 
     A :class:`~limnotech_rating_curves.ratings.RatingModel` is what the library hands
-    a user, but the batch pipeline never builds one: it holds a
-    :class:`~limnotech_rating_curves.core.FitResult` and the
+    a user, but a run over many sites never builds one: it holds a
+    :class:`~limnotech_rating_curves.core.Fit` and the
     :class:`~limnotech_rating_curves.core.Sample` it came from. Those two carry
     everything a manifest records, so rather than duplicate
-    :func:`rating_manifest` for the batch path this wraps them in the handful of
+    :func:`rating_manifest` for that path this wraps them in the handful of
     attributes it reads. Every export in the package then goes through one writer.
 
     Parameters
     ----------
-    fit : FitResult
+    fit : Fit
         A completed fit.
     sample : Sample
         The measurements it was fitted to.
@@ -136,7 +136,7 @@ class FittedRating:
     @property
     def entry(self):
         """The catalog entry, or None for a model the catalog does not list."""
-        from .models import catalog
+        from ..models import catalog
         try:
             return catalog.get(self.result.key)
         except KeyError:
@@ -153,18 +153,18 @@ class FittedRating:
         return self.result.curve.sort_values("stage_ft").reset_index(drop=True)
 
     def summary(self):
-        from .evaluate import diagnostics
+        from ..model_selection import diagnostics
         return diagnostics.posterior_summary(self.result)
 
     def diagnostics(self):
-        from .evaluate import diagnostics
+        from ..model_selection import diagnostics
         return diagnostics.convergence(self.result)
 
     def save_posterior(self, directory, sample_id=None):
         entry = self.entry
         name = sample_id or (self.sample.site_id if self.sample else "sample")
         if entry is None:
-            from .models import catalog
+            from ..models import catalog
             return catalog.save_posterior(self.result, directory, name or "sample")
         return entry.save_posterior(self.result, directory, name or "sample")
 
@@ -237,7 +237,7 @@ def rating_manifest(rating, sample_id=None) -> dict:
 
 
 def _package_version() -> str:
-    from . import __version__
+    from .. import __version__
     return __version__
 
 
@@ -354,15 +354,15 @@ def save_rating(rating, directory=None, sample_id=None, *,
 
 
 def save_fit(fit, sample, directory=None, sample_id=None, **kwargs) -> dict:
-    """Save one :class:`~limnotech_rating_curves.core.FitResult` and its sample.
+    """Save one :class:`~limnotech_rating_curves.core.Fit` and its sample.
 
-    The batch pipeline's entry point into the export format: it holds fit records
+    A whole site's entry point into the export format: it holds fit records
     rather than estimators, and this wraps one in :class:`FittedRating` so it goes
     through :func:`save_rating` like everything else.
 
     Parameters
     ----------
-    fit : FitResult
+    fit : Fit
         A completed fit.
     sample : Sample
         The measurements it was fitted to.
@@ -1141,7 +1141,7 @@ def export_directory(source, destination, *, write_csv: bool = True,
     Parameters
     ----------
     source : path-like
-        A directory of ``.rating.json`` / ``.nc`` pairs, e.g. a batch run's
+        A directory of ``.rating.json`` / ``.nc`` pairs, e.g. a multi-site run's
         ``output/fitted_curves``.
     destination : path-like
         Where the portable set goes. Created if needed. May be the same as `source`,

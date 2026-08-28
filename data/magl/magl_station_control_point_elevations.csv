@@ -1,0 +1,52 @@
+station,elevation_ft (NAVD88),Location Description
+SR-01,860.23,Top of middle concrete culvert East of center
+LC-01,778.40,Top edge of steel bridge railing
+SR-02,832.69,Top of West steel bridge guardrail
+LC-02,799.21,Top of concrete edge near radar
+SR-03,825.43,Top center of steel culvert near radar sensor
+LC-03,832.76,Paint mark near radar
+SR-04,812.10,Top center of steel culvert
+LC-04,880.06,Top of wood timber edge near radar
+SR-05,822.37,Top center of steel culvert
+LC-05,766.68,Paint mark near radar
+SR-06,874.38,SE corner of center bridge railing post DS side
+LC-06,764.60,Paint mark near radar
+SR-07,813.29,SW corner of concrete box culvert abutment
+LC-07,840.63,Paint mark near radar
+SR-08,814.10,Top of concrete bridge rail center of bridge East of radar
+LC-08,886.01,Top of steel culvert
+SR-09,804.50,Top center of steel culvert South side
+LC-09,772.33,Paint mark near radar
+SR-10,742.09,Concrete wall next to radar
+LC-10,854.50,Paint mark near radar
+SR-11,794.24,Top of concrete culvert wall next to radar
+LC-11,829.75,Paint mark near radar
+SR-12,848.32,Top of steel culvert slightly West of center near radar
+ND-01,725.61,Top center of S concrete bridge railing
+SR-13,870.34,Top center of steel culvert next to radar
+ND-02,729.05,Top of wooden post at radar
+SBR-01,815.09,Top of concrete wall near radar
+ND-03,748.24,Top of steel bridge railing near radar
+SBR-02,869.59,Top of steel culvert near radar
+ND-04,769.34,Topf of steel culvert near radar
+SBR-03,863.19,Top of East culvert
+ND-05,731.52,Top edge of I-beam railing near radar
+SBR-04,815.10,Top of steel bridge guardrail near radar
+ND-06,725.54,Top of steel culvert near radar
+SBR-05,781.46,Top of steel culvert near radar
+ND-07,770.64,Top of steel culvert near radar
+SBR-06,830.99,Top of steel bridge railing along front edge
+ND-08,695.82,Top of concrete railing near radar
+SBR-07,776.02,Top of concrete bridge railing near radar
+ND-09,762.40,Front edge of top steel pipe bridge railing
+SBR-08,774.60,Top steel guard rail
+SSL-01,578.40,Lower concrete edge S of radar
+SBR-09,801.95,Top of steel culvert near radar
+SSL-02,579.32,Bottom edge of 45° concrete bevel along culvert
+SBR-10,802.14,Top of steel culvert near radar
+SSL-04,622.64,Top edge of concrete culvert W of radar
+SBR-11,795.84,Top of steel bridge railing near radar
+SSL-05,577.87,Along top of concrete wall E of radar
+SBR-12,888.93,Top of concrete bridge deck below radar
+SBR-13,802.57,Top of steel culvert near radar
+SBR-14,804.39,Top of steel culvert near radar

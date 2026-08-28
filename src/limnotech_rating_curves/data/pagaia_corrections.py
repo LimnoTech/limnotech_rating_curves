@@ -17,9 +17,6 @@ It cannot outlive the problem quietly: :func:`to_meters` raises as soon as pagai
 claiming millimeters. Note that a cached reading carries the units claimed when it was
 fetched, so after the database is fixed that check fires only once the cache is
 refreshed - ``refresh=True``, or ``cache.clear("pagaia_series_units")``.
-
-This module must not import :mod:`limnotech_rating_curves.data.magl`, which imports
-pagaia rather than the other way round; it reads the sensor list from the CSV directly.
 """
 
 import logging
@@ -30,21 +27,16 @@ from .. import settings
 
 log = logging.getLogger(__name__)
 
+#: The Geolux millimeter cutover, as a Timestamp. See
+#: ``settings.PAGAIA_GEOLUX_MILLIMETER_END``.
+_GEOLUX_MILLIMETER_END = pd.Timestamp(settings.PAGAIA_GEOLUX_MILLIMETER_END)
+
 #: The unit pagaia claims for every water-level variable. The values are meters.
 #: Spelled several ways because the database has not been consistent about it.
 WRONG_CLAIMED_UNITS = ("millimeter", "millimeters", "mm")
 
 #: What the readings are actually in, once this module has been applied.
 TRUE_UNITS = "m"
-
-#: Geolux readings before this instant are millimeters; at or after it they are
-#: meters like every other station's. UTC - pagaia returns UTC timestamps and
-#: :func:`~limnotech_rating_curves.data.datum._as_naive_index` drops the zone
-#: without shifting the clock, so this compares against the index directly.
-GEOLUX_MILLIMETER_END = pd.Timestamp("2026-08-19 14:30")
-
-#: Which sensor each station carries. Only the Geolux rows matter here.
-GEOLUX_SENSORS_CSV = settings.DATA_DIR / "magl" / "geolux_sensors.csv"
 
 #: Variables this module knows the units of. Discharge is deliberately absent: it is
 #: not a length, and its metadata has never been checked against the values.
@@ -54,12 +46,14 @@ _sensor_cache: dict = {}
 
 
 def geolux_stations(path=None) -> frozenset:
-    """Names of the stations whose sensor is a Geolux, from `GEOLUX_SENSORS_CSV`.
+    """Names of the stations whose sensor is a Geolux.
+
+    Read from ``settings.MAGL_GEOLUX_SENSORS_CSV``.
 
     Parameters
     ----------
     path : path-like, optional
-        The CSV. Defaults to :data:`GEOLUX_SENSORS_CSV`.
+        The CSV. Defaults to :data:`settings.MAGL_GEOLUX_SENSORS_CSV`.
 
     Returns
     -------
@@ -67,7 +61,7 @@ def geolux_stations(path=None) -> frozenset:
         Station names, carrying the ``_WL`` suffix exactly as the file writes them
         and as pagaia names its stations.
     """
-    key = str(GEOLUX_SENSORS_CSV if path is None else path)
+    key = str(settings.MAGL_GEOLUX_SENSORS_CSV if path is None else path)
     if key not in _sensor_cache:
         frame = pd.read_csv(key)
         geolux = frame[frame["Sensor Type"].astype(str).str.strip()
@@ -96,7 +90,7 @@ def to_meters(raw, station: str, *, variable: str = "distance", path=None) -> tu
         Which variable these readings are. Must be a length; see
         :data:`LENGTH_VARIABLES`.
     path : path-like, optional
-        The sensor CSV. Defaults to :data:`GEOLUX_SENSORS_CSV`.
+        The sensor CSV. Defaults to :data:`settings.MAGL_GEOLUX_SENSORS_CSV`.
 
     Returns
     -------
@@ -138,14 +132,14 @@ def to_meters(raw, station: str, *, variable: str = "distance", path=None) -> tu
         # station took before the cutover. A whole-series test would be wrong: a
         # window can straddle the cutover, and several already do.
         values = values.astype(float).copy()
-        before = values.index < GEOLUX_MILLIMETER_END
+        before = values.index < _GEOLUX_MILLIMETER_END
         if before.any():
             values.loc[before] = values.loc[before] / 1000.0
             log.info("%s is a Geolux station: divided %d of %d reading(s) before %s "
                      "by 1000, they were recorded in millimeters", station,
-                     int(before.sum()), len(values), GEOLUX_MILLIMETER_END)
+                     int(before.sum()), len(values), _GEOLUX_MILLIMETER_END)
     elif station not in geolux_stations(path):
         log.info("%s is not listed in %s; reading it as meters like the Vega stations",
-                 station, GEOLUX_SENSORS_CSV.name)
+                 station, settings.MAGL_GEOLUX_SENSORS_CSV.name)
 
     return values.rename(station), TRUE_UNITS

@@ -1,12 +1,13 @@
 import numpy as np
 
 from .compiled import CompiledModel
-from .defaults import ADVI_STEPS, NUTS_SAMPLER
+from ... import settings
 
 
 def sample_hyperparameters(compiled: CompiledModel, *, method, draws, tune, chains,
                            seed, target_accept, cores, progressbar,
-                           advi_n=ADVI_STEPS, nuts_sampler=NUTS_SAMPLER):
+                           advi_n=settings.BDRC_ADVI_STEPS,
+                           nuts_sampler=settings.BDRC_NUTS_SAMPLER):
     """Sample the marginal posterior, using NUTS or ADVI.
 
     Returns (theta_draws, idata) with theta_draws shaped (n_draws, n_theta),

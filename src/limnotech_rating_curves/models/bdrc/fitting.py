@@ -2,17 +2,20 @@ import numpy as np
 import pandas as pd
 
 from .compiled import c_upper_bound, compiled_for, finalize_grid
-from .defaults import (ADVI_STEPS, CFS_TO_CMS, FT_TO_M, MODELS, NUM_CHAINS,
-                       NUM_DRAWS, NUM_TUNE, NUTS_SAMPLER, SEED, target_accept_for)
+from ... import settings
+from .defaults import MODELS, target_accept_for
 from .design import components
 from .posterior import assemble
 from .sampling import sample_hyperparameters
 
 
 def fit(discharge, stage, model="gplm0", *, method="nuts", c_param=None,
-        h_max=None, forcepoint=None, draws=NUM_DRAWS, tune=NUM_TUNE,
-        chains=NUM_CHAINS, cores=1, seed=SEED, target_accept=None,
-        progressbar=False, advi_n=ADVI_STEPS, nuts_sampler=NUTS_SAMPLER):
+        h_max=None, forcepoint=None,
+        draws=settings.BDRC_NUM_DRAWS, tune=settings.BDRC_NUM_TUNE,
+        chains=settings.BDRC_NUM_CHAINS, cores=1, seed=settings.BDRC_SEED,
+        target_accept=None, progressbar=False,
+        advi_n=settings.BDRC_ADVI_STEPS,
+        nuts_sampler=settings.BDRC_NUTS_SAMPLER):
     """Fit a bdrc rating curve. SI units: `discharge` in m^3/s, `stage` in m.
 
     model       one of "plm0", "plm", "gplm0", "gplm"
@@ -78,7 +81,7 @@ def fit(discharge, stage, model="gplm0", *, method="nuts", c_param=None,
 
 def fit_predict(stage_ft, discharge_cfs, grid_stage_ft, *, model="gplm0",
                 method="nuts", c_param_ft=None, with_loglik=False,
-                advi_n=ADVI_STEPS, **kwargs):
+                advi_n=settings.BDRC_ADVI_STEPS, **kwargs):
     """Fit one sample and predict discharge on `grid_stage_ft`, in ft and cfs.
 
     Returns a DataFrame with columns stage_ft, q_median_cfs, q_lower_cfs,
@@ -92,24 +95,25 @@ def fit_predict(stage_ft, discharge_cfs, grid_stage_ft, *, model="gplm0",
 
     bdrc's priors are tuned to SI, so the fit runs in m and m^3/s and the curve is
     converted back - the same conversion the retired R bridge did."""
-    stage = np.asarray(stage_ft, float).ravel() * FT_TO_M
-    discharge = np.asarray(discharge_cfs, float).ravel() * CFS_TO_CMS
-    grid = np.asarray(grid_stage_ft, float).ravel() * FT_TO_M
-    c_param = None if c_param_ft is None else float(c_param_ft) * FT_TO_M
+    ft_to_m, cfs_to_cms = settings.FEET_TO_METERS, settings.CFS_TO_CMS
+    stage = np.asarray(stage_ft, float).ravel() * ft_to_m
+    discharge = np.asarray(discharge_cfs, float).ravel() * cfs_to_cms
+    grid = np.asarray(grid_stage_ft, float).ravel() * ft_to_m
+    c_param = None if c_param_ft is None else float(c_param_ft) * ft_to_m
 
     fitted = fit(discharge, stage, model, method=method, c_param=c_param,
                  h_max=grid.max(), advi_n=advi_n, **kwargs)
     predicted = fitted.predict(grid)
     rating = fitted.predict_posterior(grid)
     curve = pd.DataFrame({
-        "stage_ft": predicted["h"] / FT_TO_M,
-        "q_median_cfs": predicted["median"] / CFS_TO_CMS,
-        "q_lower_cfs": predicted["lower"] / CFS_TO_CMS,
-        "q_upper_cfs": predicted["upper"] / CFS_TO_CMS,
-        "q_mean_cfs": rating["mean"] / CFS_TO_CMS,
-        "q_posterior_median_cfs": rating["median"] / CFS_TO_CMS,
-        "q_posterior_lower_cfs": rating["lower"] / CFS_TO_CMS,
-        "q_posterior_upper_cfs": rating["upper"] / CFS_TO_CMS})
+        "stage_ft": predicted["h"] / ft_to_m,
+        "q_median_cfs": predicted["median"] / cfs_to_cms,
+        "q_lower_cfs": predicted["lower"] / cfs_to_cms,
+        "q_upper_cfs": predicted["upper"] / cfs_to_cms,
+        "q_mean_cfs": rating["mean"] / cfs_to_cms,
+        "q_posterior_median_cfs": rating["median"] / cfs_to_cms,
+        "q_posterior_lower_cfs": rating["lower"] / cfs_to_cms,
+        "q_posterior_upper_cfs": rating["upper"] / cfs_to_cms})
     curve = curve[np.isfinite(curve["q_median_cfs"]) & (curve["q_median_cfs"] > 0)]
     if not with_loglik:
         return curve

@@ -9,7 +9,7 @@ log = logging.getLogger(__name__)
 
 
 def _idata(fit_or_model):
-    """The InferenceData behind an estimator or a FitResult."""
+    """The InferenceData behind an estimator or a Fit."""
     fit = getattr(fit_or_model, "result", fit_or_model)
     idata = getattr(fit, "idata", None)
     if idata is None and getattr(fit, "rating", None) is not None:
@@ -24,7 +24,7 @@ def posterior_summary(fit_or_model, var_names=None) -> pd.DataFrame:
 
     Parameters
     ----------
-    fit_or_model : RatingModel or FitResult
+    fit_or_model : RatingModel or Fit
         A completed fit.
     var_names : list of str, optional
         Restrict to these parameters.
@@ -50,7 +50,7 @@ def convergence(fit_or_model, var_names=None) -> pd.DataFrame:
 
     Parameters
     ----------
-    fit_or_model : RatingModel or FitResult
+    fit_or_model : RatingModel or Fit
         A completed fit.
     var_names : list of str, optional
         Restrict to these parameters.
@@ -88,7 +88,7 @@ def convergence_report(fit_or_model) -> str:
 
     Parameters
     ----------
-    fit_or_model : RatingModel or FitResult
+    fit_or_model : RatingModel or Fit
         A completed fit.
 
     Returns
@@ -120,7 +120,7 @@ def plot_convergence(fit_or_model, ax=None, var_names=None):
 
     Parameters
     ----------
-    fit_or_model : RatingModel or FitResult
+    fit_or_model : RatingModel or Fit
         A completed fit.
     ax : matplotlib.axes.Axes, optional
         Axes to draw into.
@@ -162,7 +162,7 @@ def plot_effective_sample_size(fit_or_model, ax=None, var_names=None):
 
     Parameters
     ----------
-    fit_or_model : RatingModel or FitResult
+    fit_or_model : RatingModel or Fit
         A completed fit.
     ax : matplotlib.axes.Axes, optional
         Axes to draw into.
@@ -206,7 +206,7 @@ def plot_trace(fit_or_model, var_names=None, **kwargs):
 
     Parameters
     ----------
-    fit_or_model : RatingModel or FitResult
+    fit_or_model : RatingModel or Fit
         A completed fit.
     var_names : list of str, optional
         Restrict to these parameters.

@@ -3,7 +3,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from ..support import cache
+from ..helpers import cache
 from . import datum as datum_module
 from . import pagaia_corrections
 from .. import settings
@@ -65,9 +65,6 @@ VARIABLE_TERMS = {
     "discharge": ("discharge", "flow"),
 }
 
-#: Largest acceptable gap between a discharge measurement and the station reading
-#: used for it.
-DEFAULT_MATCH_TOLERANCE = "3h"
 
 def station_coordinates(stations) -> dict:
     """Coordinates of pagaia stations, for the map.
@@ -217,7 +214,8 @@ def _select_variable(data: pd.DataFrame, variable: str) -> "pd.Series | None":
 
 def station_sample(pagaia_station, discharge, *, stage_datum=None,
                    reference_elevation=None, variable: str = "stage",
-                   tolerance: str = DEFAULT_MATCH_TOLERANCE, start=None, end=None,
+                   tolerance: str = settings.PAGAIA_MATCH_TOLERANCE,
+                   start=None, end=None,
                    units: str = "ft", refresh: bool = False) -> Sample:
     """Build a fittable :class:`Sample` from a pagaia station and field discharge.
 

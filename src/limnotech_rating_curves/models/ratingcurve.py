@@ -5,7 +5,8 @@ import numpy as np
 import pandas as pd
 
 from .. import settings
-from ..core import FitResult, fit_metrics, padded_stage_grid
+from ..core import Fit, padded_stage_grid
+from ..model_selection.metrics import fit_metrics
 from ..data.zero_flow import ZeroFlowEstimate, estimate_zero_flow
 
 log = logging.getLogger(__name__)
@@ -683,11 +684,11 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
         cores=None, advi_iters: int = settings.ADVI_ITERS,
         nuts_sampler: str = None, target_accept: float = None, zero_flow=None,
         enforce_min_points: bool = True, config_override=None,
-        with_log_likelihood: bool = True, grid=None) -> FitResult:
+        with_log_likelihood: bool = True, grid=None) -> Fit:
     """Fit one ratingcurve model to one sample. Never raises.
 
-    Any failure is captured in the returned result's ``status`` and ``reason``, so
-    a batch run over many sites reports what went wrong per model instead of
+    Any failure is captured in the returned fit's ``status`` and ``reason``, so
+    a run over many sites reports what went wrong per model instead of
     aborting.
 
     Parameters
@@ -695,7 +696,7 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
     sample : Sample or pandas.DataFrame
         The measurements.
     key, label : str
-        Identifier and display name recorded on the result.
+        Identifier and display name recorded on the fit.
     algorithm : {'power_law', 'spline'}
         Which family to fit.
     segments : int, optional
@@ -716,7 +717,7 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
         convergence callbacks that can stop early, so this is a ceiling.
     nuts_sampler : str, optional
         Which NUTS implementation (see ``settings.NUTS_SAMPLERS``). Recorded on
-        the result, because ratingcurve builds its own stored sampler config
+        the fit, because ratingcurve builds its own stored sampler config
         before this keyword is merged in and so never sees it.
     target_accept : float, optional
         NUTS target acceptance rate. ``None`` (the default) resolves it from the
@@ -735,7 +736,7 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
         model still holds the data it was fitted on. This has to happen here rather
         than on demand: ratingcurve's ``predict`` sets new stage data on the PyMC
         model and leaves it there, so a later
-        :func:`~limnotech_rating_curves.evaluate.metrics.ensure_log_likelihood` would
+        :func:`~limnotech_rating_curves.model_selection.elpd.ensure_log_likelihood` would
         try to score the fitted observations against whatever stages were predicted
         last, and fail on the shape mismatch. Turn it off only to save the time and
         memory when the fit will never be scored.
@@ -746,7 +747,7 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
 
     Returns
     -------
-    FitResult
+    Fit
     """
     from ..core import Sample
     frame = sample.to_frame() if isinstance(sample, Sample) else pd.DataFrame(sample)
@@ -762,22 +763,22 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
     if config_override:
         config = {**config, **config_override}
 
-    result = FitResult(key=key, label=label, family="ratingcurve", n=n,
-                       status="skipped", reason=reason, config=config)
+    fit = Fit(key=key, label=label, family="ratingcurve", n=n,
+              status="skipped", reason=reason, config=config)
     if not should_fit:
-        return result
+        return fit
 
     try:
         if method == "advi":
             sampler_kwargs = {"draws": settings.ADVI_DRAWS, "n": advi_iters}
-            result.config = {**result.config, "method": "advi", "advi_iters": advi_iters}
+            fit.config = {**fit.config, "method": "advi", "advi_iters": advi_iters}
         else:
             sampler_kwargs = {"draws": settings.NUTS_DRAWS, "tune": settings.NUTS_TUNE,
                               "nuts_sampler": nuts_sampler,
                               "target_accept": target_accept}
             if cores is not None:
                 sampler_kwargs["cores"] = cores
-            result.config = {**result.config, "method": "nuts",
+            fit.config = {**fit.config, "method": "nuts",
                              "nuts_sampler": nuts_sampler,
                              "target_accept": target_accept}
 
@@ -786,7 +787,7 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
             prior = breakpoint_prior(stage, discharge, model_kwargs["segments"],
                                      zero_flow=zero_flow)
             model_kwargs["prior"] = prior
-            result.config = {**result.config, "zero_flow_prior_ft": prior["mu"][0]}
+            fit.config = {**fit.config, "zero_flow_prior_ft": prior["mu"][0]}
         else:
             model_kwargs.setdefault("df", settings.DEFAULT_SPLINE_KNOTS)
 
@@ -797,7 +798,7 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
         # model and leave it there. ADVI fits are not scored by policy, so there is
         # nothing to compute for them.
         if with_log_likelihood and method != "advi":
-            from ..evaluate.metrics import ensure_log_likelihood
+            from ..model_selection.elpd import ensure_log_likelihood
             try:
                 ensure_log_likelihood(rating)
             except Exception as exc:  # noqa: BLE001 - scoring is not the fit
@@ -812,19 +813,19 @@ def fit(sample, *, key: str, label: str, algorithm: str, segments=None,
         drawable = np.isfinite(table["discharge_cfs"]) & (table["discharge_cfs"] > 0)
         table = table[drawable].reset_index(drop=True)
         predicted = rating.posterior_mean(stage)
-        result.rating = rating
-        result.idata = rating.idata
-        result.curve = table[["stage_ft", "discharge_cfs",
+        fit.rating = rating
+        fit.idata = rating.idata
+        fit.curve = table[["stage_ft", "discharge_cfs",
                               "discharge_posterior_median_cfs",
                               "posterior_lower", "posterior_upper",
                               "discharge_predictive_mean_cfs",
                               "discharge_predictive_median_cfs", "lower", "upper"]]
-        result.predicted = predicted
-        result.metrics = fit_metrics(discharge, predicted)
-        result.status = "ok"
-        result.reason = ""
+        fit.predicted = predicted
+        fit.metrics = fit_metrics(discharge, predicted)
+        fit.status = "ok"
+        fit.reason = ""
     except Exception as exc:  # noqa: BLE001 - a failed model must not sink the run
-        result.status = "failed"
-        result.reason = f"{type(exc).__name__}: {str(exc)[:160]}"
-        log.debug("%s failed on n=%d: %s", key, n, result.reason)
-    return result
+        fit.status = "failed"
+        fit.reason = f"{type(exc).__name__}: {str(exc)[:160]}"
+        log.debug("%s failed on n=%d: %s", key, n, fit.reason)
+    return fit

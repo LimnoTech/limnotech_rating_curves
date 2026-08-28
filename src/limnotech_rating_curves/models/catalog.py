@@ -1,13 +1,14 @@
 import logging
+from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
 
 from . import bdrc, exponential, polynomial, ratingcurve
-from ..evaluate import metrics as metrics_module
+from ..model_selection import elpd as metrics_module
 from .. import settings
-from ..core import (FitResult, FoldCurve, Sample, fit_metrics,
-                    padded_stage_grid)
+from ..core import Fit, FoldCurve, Sample, padded_stage_grid
+from ..model_selection.metrics import fit_metrics
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ class ModelEntry:
         self.min_points = min_points
         self.dash = dash or FAMILY_DASH.get(self.family, "solid")
 
-    def fit(self, sample, **kwargs) -> FitResult:
+    def fit(self, sample, **kwargs) -> Fit:
         """Fit this model to all of a sample.
 
         Implemented by each family; see :meth:`RatingCurveEntry.fit` and
@@ -100,7 +101,7 @@ class ModelEntry:
 
         Returns
         -------
-        FitResult
+        Fit
         """
         raise NotImplementedError
 
@@ -127,12 +128,12 @@ class ModelEntry:
         """
         raise NotImplementedError
 
-    def save_posterior(self, fit: FitResult, directory, sample_id):
+    def save_posterior(self, fit: Fit, directory, sample_id):
         """Write a fitted posterior to an ArviZ NetCDF file.
 
         Parameters
         ----------
-        fit : FitResult
+        fit : Fit
             The fit to export.
         directory : path-like
             Destination directory.
@@ -147,7 +148,7 @@ class ModelEntry:
         """
         return save_posterior(fit, directory, sample_id)
 
-    def bayes_metrics(self, fit: FitResult) -> dict:
+    def bayes_metrics(self, fit: Fit) -> dict:
         """PSIS-LOO and WAIC scores for a completed fit.
 
         Implemented by each family, because the two produce their pointwise
@@ -155,7 +156,7 @@ class ModelEntry:
 
         Parameters
         ----------
-        fit : FitResult
+        fit : Fit
             A completed fit.
 
         Returns
@@ -195,7 +196,7 @@ class RatingCurveEntry(ModelEntry):
             enforce_min_points: bool = True, zero_flow=None, cores=None,
             advi_iters: int = settings.ADVI_ITERS, nuts_sampler=None,
             target_accept=None, config_override=None,
-            with_log_likelihood: bool = False, grid=None) -> FitResult:
+            with_log_likelihood: bool = True, grid=None) -> Fit:
         """Fit on all of a sample.
 
         Parameters
@@ -226,14 +227,18 @@ class RatingCurveEntry(ModelEntry):
         grid : array-like, optional
             Stage grid the curve is tabulated on. Defaults to the padded grid
             every family is given.
-        with_log_likelihood
-            Accepted for interface symmetry and unused: a ratingcurve fit keeps
-            its live posterior, so the log-likelihood is computed on demand in
-            :meth:`bayes_metrics`.
+        with_log_likelihood : bool, default True
+            Compute and keep the pointwise log-likelihood, which is what the ELPD
+            comparison is scored on. Done while the model still holds the
+            measurements: `table` and `predict` push a new stage grid onto it and
+            leave it there, so a log-likelihood taken afterwards would score the
+            grid instead. Costs one likelihood evaluation per draw per measurement,
+            which is nothing beside the sampling. Ignored for an ADVI fit, which is
+            not scored.
 
         Returns
         -------
-        FitResult
+        Fit
         """
         return ratingcurve.fit(
             sample, key=self.key, label=self.label, algorithm=self.algorithm,
@@ -301,17 +306,17 @@ class RatingCurveEntry(ModelEntry):
             test_discharge=test["discharge_cfs"].tolist(),
             test_metrics=fit_metrics(test["discharge_cfs"].to_numpy(float), predicted))
 
-    def bayes_metrics(self, fit: FitResult) -> dict:
+    def bayes_metrics(self, fit: Fit) -> dict:
         """PSIS-LOO and WAIC for a ratingcurve fit.
 
         The log-likelihood is computed from the live posterior on demand, then
         shifted out of ratingcurve's standardized log-discharge space so the ELPD
         is comparable with bdrc's (see
-        :mod:`limnotech_rating_curves.evaluate.metrics`).
+        :mod:`limnotech_rating_curves.model_selection.elpd`).
 
         Parameters
         ----------
-        fit : FitResult
+        fit : Fit
 
         Returns
         -------
@@ -366,7 +371,7 @@ class BdrcEntry(ModelEntry):
             enforce_min_points: bool = True, zero_flow=None, cores=None,
             advi_iters: int = settings.ADVI_ITERS, nuts_sampler=None,
             target_accept=None, config_override=None,
-            with_log_likelihood: bool = False, grid=None) -> FitResult:
+            with_log_likelihood: bool = True, grid=None) -> Fit:
         """Fit on all of a sample.
 
         Parameters
@@ -400,16 +405,17 @@ class BdrcEntry(ModelEntry):
             record.
         config_override : dict, optional
             Extra keywords forwarded to :func:`bdrc.fit_predict`.
-        with_log_likelihood : bool, default False
+        with_log_likelihood : bool, default True
             Also return the pointwise log-likelihood, which is what the ELPD
-            comparison needs. A batch run turns this on.
+            comparison needs. It cannot be recovered after the fit, so this is on
+            by default; turn it off only to save the memory.
         grid : array-like, optional
             Stage grid to evaluate the curve on. Defaults to a padded grid over
             the observed range.
 
         Returns
         -------
-        FitResult
+        Fit
         """
         frame = _as_frame(sample)
         stage = frame["stage_ft"].to_numpy(float)
@@ -426,15 +432,15 @@ class BdrcEntry(ModelEntry):
         accept = (bdrc.target_accept_for(len(frame)) if target_accept is None
                   else float(target_accept))
 
-        result = FitResult(
+        fit = Fit(
             key=self.key, label=self.label, family="bdrc", n=len(frame),
             status="skipped", reason="",
             config={"variant": self.variant, "zero_flow_ft": zero_flow_ft,
                     "method": method, "nuts_sampler": sampler,
                     "target_accept": accept})
         if not np.isfinite(stage).any() or not np.isfinite(discharge).any():
-            result.reason = "no finite measurements"
-            return result
+            fit.reason = "no finite measurements"
+            return fit
 
         grid = _padded_grid(frame) if grid is None else np.asarray(grid, float)
         extra = dict(config_override or {})
@@ -448,29 +454,29 @@ class BdrcEntry(ModelEntry):
                 c_param_ft=zero_flow_ft, with_loglik=with_log_likelihood,
                 advi_n=advi_iters, seed=seed, **extra)
         except Exception as exc:  # noqa: BLE001
-            result.status = "failed"
-            result.reason = f"{type(exc).__name__}: {str(exc)[:160]}"
-            log.debug("%s failed on n=%d: %s", self.key, len(frame), result.reason)
-            return result
+            fit.status = "failed"
+            fit.reason = f"{type(exc).__name__}: {str(exc)[:160]}"
+            log.debug("%s failed on n=%d: %s", self.key, len(frame), fit.reason)
+            return fit
 
         if with_log_likelihood:
             curve = output["curve"]
-            result.log_likelihood = output["loglik"]
-            result.native = output["native"]
+            fit.log_likelihood = output["loglik"]
+            fit.native = output["native"]
             fitted = output.get("fit")
-            result.idata = getattr(fitted, "idata", None)
+            fit.idata = getattr(fitted, "idata", None)
             # c is drawn as log(h_min - c) in metres and never appears in the idata on
             # its own scale, so the posterior mean is recorded here in feet - the only
             # place a caller can reach it afterwards.
             drawn_c = getattr(fitted, "c_posterior", None)
             if drawn_c is not None:
-                result.config["zero_flow_fitted_ft"] = float(
-                    np.mean(drawn_c) / bdrc.FT_TO_M)
+                fit.config["zero_flow_fitted_ft"] = float(
+                    np.mean(drawn_c) / settings.FEET_TO_METERS)
         else:
             curve = output
         if curve.empty:
-            result.reason = "bdrc returned an empty curve"
-            return result
+            fit.reason = "bdrc returned an empty curve"
+            return fit
 
         curve = curve.rename(
             columns={"q_median_cfs": "discharge_predictive_median_cfs",
@@ -481,14 +487,14 @@ class BdrcEntry(ModelEntry):
                      "q_posterior_upper_cfs": "posterior_upper"})
         predicted = np.interp(stage, curve["stage_ft"], curve["discharge_cfs"],
                               left=np.nan, right=np.nan)
-        result.status = "ok"
-        result.curve = curve[["stage_ft", "discharge_cfs",
+        fit.status = "ok"
+        fit.curve = curve[["stage_ft", "discharge_cfs",
                               "discharge_posterior_median_cfs",
                               "posterior_lower", "posterior_upper",
                               "discharge_predictive_median_cfs", "lower", "upper"]]
-        result.predicted = predicted
-        result.metrics = fit_metrics(discharge, predicted)
-        return result
+        fit.predicted = predicted
+        fit.metrics = fit_metrics(discharge, predicted)
+        return fit
 
     def fit_fold(self, train, test, grid, split, *, seed: int = settings.SEED,
                  zero_flow=None, nuts_sampler=None, method: str = "nuts"
@@ -549,12 +555,12 @@ class BdrcEntry(ModelEntry):
             test_discharge=test["discharge_cfs"].tolist(),
             test_metrics=fit_metrics(test["discharge_cfs"].to_numpy(float), predicted))
 
-    def bayes_metrics(self, fit: FitResult) -> dict:
+    def bayes_metrics(self, fit: Fit) -> dict:
         """PSIS-LOO and WAIC from bdrc's own pointwise log-likelihood.
 
         Parameters
         ----------
-        fit : FitResult
+        fit : Fit
             A fit produced with ``with_log_likelihood=True``.
 
         Returns
@@ -603,7 +609,7 @@ class PolynomialEntry(ModelEntry):
         self.degree = degree
 
     def fit(self, sample, *, stage_range=None, level: float = 0.95,
-            enforce_min_points: bool = True, **ignored) -> FitResult:
+            enforce_min_points: bool = True, **ignored) -> Fit:
         """Fit by ordinary least squares.
 
         Parameters
@@ -623,7 +629,7 @@ class PolynomialEntry(ModelEntry):
 
         Returns
         -------
-        FitResult
+        Fit
         """
         return polynomial.fit(sample, key=self.key, label=self.label,
                               degree=self.degree, min_points=self.min_points,
@@ -650,11 +656,11 @@ class PolynomialEntry(ModelEntry):
             test_discharge=test["discharge_cfs"].tolist(),
             test_metrics=fit_metrics(test["discharge_cfs"].to_numpy(float), predicted))
 
-    def save_posterior(self, fit: FitResult, directory, sample_id):
+    def save_posterior(self, fit: Fit, directory, sample_id):
         """Nothing to write: a least-squares fit has no posterior draws."""
         return None
 
-    def bayes_metrics(self, fit: FitResult) -> dict:
+    def bayes_metrics(self, fit: Fit) -> dict:
         """NaNs with a reason - there is no posterior to score."""
         return metrics_module.unavailable(
             "a least-squares polynomial has no posterior, so no ELPD; compare it on "
@@ -688,7 +694,7 @@ class ExponentialEntry(ModelEntry):
         super().__init__(key, label, short_label, color, min_points, dash=dash)
 
     def fit(self, sample, *, level: float = 0.95,
-            enforce_min_points: bool = True, **ignored) -> FitResult:
+            enforce_min_points: bool = True, **ignored) -> Fit:
         """Fit by ordinary least squares on log discharge.
 
         Parameters
@@ -705,7 +711,7 @@ class ExponentialEntry(ModelEntry):
 
         Returns
         -------
-        FitResult
+        Fit
         """
         return exponential.fit(sample, key=self.key, label=self.label,
                                min_points=self.min_points,
@@ -731,11 +737,11 @@ class ExponentialEntry(ModelEntry):
             test_discharge=test["discharge_cfs"].tolist(),
             test_metrics=fit_metrics(test["discharge_cfs"].to_numpy(float), predicted))
 
-    def save_posterior(self, fit: FitResult, directory, sample_id):
+    def save_posterior(self, fit: Fit, directory, sample_id):
         """Nothing to write: a log-linear least-squares fit has no posterior draws."""
         return None
 
-    def bayes_metrics(self, fit: FitResult) -> dict:
+    def bayes_metrics(self, fit: Fit) -> dict:
         """NaNs with a reason - there is no posterior to score."""
         return metrics_module.unavailable(
             "an exponential least-squares fit has no posterior, so no ELPD; compare "
@@ -774,7 +780,7 @@ def _resolve_fixed_zero_flow(zero_flow, stage, discharge):
     return float(zero_flow)
 
 
-def save_posterior(fit: FitResult, directory, sample_id) -> "str | None":
+def save_posterior(fit: Fit, directory, sample_id) -> "str | None":
     """Write one fitted model's posterior to an ArviZ NetCDF file.
 
     Both families end up as NetCDF, by two paths, and the difference matters when
@@ -793,7 +799,7 @@ def save_posterior(fit: FitResult, directory, sample_id) -> "str | None":
 
     Parameters
     ----------
-    fit : FitResult
+    fit : Fit
         The fit to export.
     directory : path-like
         Destination directory, created if needed.
@@ -890,13 +896,11 @@ MODEL_KEYS = [entry.key for entry in MODELS if entry.role == "model"]
 FORM_KEYS = {"linear": "linear", "quadratic": "quadratic",
              "exponential": "exponential"}
 
-DEFAULT_KEYS = ("power_law", "power_law_2seg", "spline", "bdrc_gplm0", 
-                "linear", "quadratic", "exponential")
 
 #: Group names :func:`select` understands, mapped to their member keys.
 GROUPS = {
     "all": [entry.key for entry in MODELS],
-    "default": list(DEFAULT_KEYS),
+    "default": list(settings.DEFAULT_MODEL_KEYS),
     "bdrc": BDRC_KEYS,
     "ratingcurve": RATINGCURVE_KEYS,
     "power_law_family": [k for k in RATINGCURVE_KEYS if k.startswith("power_law")],
@@ -1037,7 +1041,7 @@ def short_label(key) -> str:
     return entry.short_label if entry else str(key)
 
 
-def select(spec=None) -> list:
+def select(spec: str | Sequence[str] | None = None) -> list["ModelEntry"]:
     """Resolve a ``models=`` specification to catalog entries, in catalog order.
 
     Parameters
@@ -1065,7 +1069,7 @@ def select(spec=None) -> list:
     ['power_law', 'spline']
     """
     if not spec:
-        return [get(key) for key in DEFAULT_KEYS]
+        return [get(key) for key in settings.DEFAULT_MODEL_KEYS]
     if isinstance(spec, (str, ModelEntry)):
         spec = [spec]
 

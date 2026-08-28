@@ -1,0 +1,97 @@
+sensor_id,group,folder_date,timestamp,discharge_cfs,source_type,stream_width_ft,total_area_ft2,source_file,note
+LC-01,LC,2024-11-06,2024-11-06 15:00:00,-9.317,xlsx,,,LC Discharge Measurement Data\LC-01\2024-11-06\2024-11-06.xlsx,
+LC-02,LC,2024-11-06,2024-11-06 11:40:00,0.02148,xlsx,,,LC Discharge Measurement Data\LC-02\2024-11-06\2024-11-06.xlsx,shifted layout
+LC-02,LC,2025-02-01,2025-02-01 13:00:00,22.581,xlsx,,,LC Discharge Measurement Data\LC-02\2025-02-01\2025-02-01.xlsx,
+LC-03,LC,2025-02-01,2025-02-01 13:40:00,20.288,xlsx,,,LC Discharge Measurement Data\LC-03\2025-02-01\2025-02-01.xlsx,
+LC-03,LC,2025-06-13,2025-06-13 13:20:00,1.8754008,xlsx,,,LC Discharge Measurement Data\LC-03\2025-06-13\2025-06-13.xlsx,shifted layout
+LC-04,LC,2025-02-01,2025-02-01 16:40:00,6.075000000000001,xlsx,,,LC Discharge Measurement Data\LC-04\2025-02-01\2025-02-01.xlsx,
+LC-04,LC,2025-03-16,2025-03-16 15:00:00,17.4,xlsx,,,LC Discharge Measurement Data\LC-04\2025-03-16\2025-03-16.xlsx,
+LC-05,LC,2024-11-06,2024-11-06 13:05:00,1.2872400000000002,xlsx,,,LC Discharge Measurement Data\LC-05\2024-11-06.xlsx,
+LC-06,LC,2024-11-06,2024-11-06 13:50:00,9.961599999999999,xlsx,,,LC Discharge Measurement Data\LC-06\2024-11-06\2024-11-06.xlsx,
+LC-06,LC,2024-12-09,2024-12-09 15:30:00,19.26092,xlsx,,,LC Discharge Measurement Data\LC-06\2024-12-09\2024-12-09.xlsx,
+LC-07,LC,2025-02-01,2025-02-01 15:40:00,18.369000000000003,xlsx,,,LC Discharge Measurement Data\LC-07\2025-02-01\2025-02-01.xlsx,
+LC-08,LC,2024-11-06,2024-11-06 09:10:00,-0.11030399999999999,xlsx,,,LC Discharge Measurement Data\LC-08\2024-11-06\2024-11-06.xlsx,
+LC-08,LC,2025-02-01,2025-02-01 16:05:00,2.333,xlsx,,,LC Discharge Measurement Data\LC-08\2025-02-01\2025-02-01.xlsx,
+LC-09,LC,2024-11-06,2024-11-06 14:50:00,0.08019000000000003,xlsx,,,LC Discharge Measurement Data\LC-09\2024-11-06\2024-11-06.xlsx,
+LC-09,LC,2024-12-09,2024-12-09 13:45:00,0.15433200000000002,xlsx,,,LC Discharge Measurement Data\LC-09\2024-12-09\2024-12-09.xlsx,
+LC-09,LC,2025-02-01,2025-02-01 11:25:00,0.684,xlsx,,,LC Discharge Measurement Data\LC-09\2025-02-01\2025-02-01.xlsx,
+LC-09,LC,2025-03-16,2025-03-16 13:40:00,39.11,xlsx,,,LC Discharge Measurement Data\LC-09\2025-03-16\2025-03-16.xlsx,
+LC-10,LC,2025-02-01,2025-02-01 16:05:00,9.769499999999999,xlsx,,,LC Discharge Measurement Data\LC-10\2025-02-01\2025-02-01.xlsx,
+LC-11,LC,2025-02-01,2025-02-01 15:05:00,4.155,xlsx,,,LC Discharge Measurement Data\LC-11\2025-02-01\2025-02-01.xlsx,
+LC-11,LC,2025-03-16,2025-03-16 14:30:00,15.078000000000001,xlsx,,,LC Discharge Measurement Data\LC-11\2025-03-16\2025-03-16.xlsx,
+ND-01,ND,2024-09-06,2024-09-06 13:55:00,0.21175,xlsx,,,ND Discharge Measurement Data\ND-01\2024-09-06\2024-09-06.xlsx,
+ND-02,ND,2024-12-10,2024-12-10 12:30:00,0.34569600000000006,xlsx,,,ND Discharge Measurement Data\ND-02\2024-12-10\2024-12-10.xlsx,
+ND-03,ND,2024-12-10,2024-12-10 10:55:00,0.39465000000000006,xlsx,,,ND Discharge Measurement Data\ND-03\2024-12-10\2024-12-10.xlsx,
+ND-03,ND,2025-04-04,2025-04-04 13:12:05,98.92273806670599,qrev_adcp,,,ND Discharge Measurement Data\ND-03\2025-04-04\20250822_135733_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+ND-03,ND,2025-06-13,2025-06-13 11:15:00,1.718225,xlsx,,,ND Discharge Measurement Data\ND-03\2025-06-13\2025-06-13.xlsx,
+ND-05,ND,2024-09-06,2024-09-06 12:00:00,2.0770000000000004,xlsx,,,ND Discharge Measurement Data\ND-05\2024-09-06\2024-09-06.xlsx,
+ND-05,ND,2024-12-10,2024-12-10 13:30:00,1.3179999999999998,xlsx,,,ND Discharge Measurement Data\ND-05\2024-12-10\2024-12-10.xlsx,
+ND-05,ND,2025-04-04,2025-04-04 12:39:59,287.960030031804,qrev_adcp,,,ND Discharge Measurement Data\ND-05\2025-04-04\20250822_135641_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+ND-06,ND,2024-09-06,2024-09-06 12:55:00,0.07,xlsx,,,ND Discharge Measurement Data\ND-06\2024-09-06\2024-09-06.xlsx,
+ND-06,ND,2024-12-10,2024-12-10 12:15:00,0.0131,xlsx,,,ND Discharge Measurement Data\ND-06\2024-12-10\2024-12-10.xlsx,
+ND-08,ND,2025-04-04,2025-04-04 10:53:17,1925.277229923926,qrev_adcp,,,ND Discharge Measurement Data\ND-08\2025-04-04\20250822_135558_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+ND-09,ND,2024-12-10,2024-12-10 10:20:00,0.008199999999999999,xlsx,,,ND Discharge Measurement Data\ND-09\2024-12-10\2024-12-10.xlsx,
+SBR-01,SBR,2024-09-06,2024-09-06 08:30:00,0.7683866666666666,xlsx,,,SBR Discharge Measurement Data\SBR-01\2024-09-06\2024-09-06.xlsx,
+SBR-01,SBR,2024-11-06,2024-11-06 15:00:00,-9.317,xlsx,,,SBR Discharge Measurement Data\SBR-01\2024-11-06\2024-11-06.xlsx,
+SBR-02,SBR,2024-12-29,2024-12-29 11:20:00,0.2341,xlsx,,,SBR Discharge Measurement Data\SBR-02\2024-12-29\2024-12-29.xlsx,
+SBR-02,SBR,2025-04-03,2025-04-03 15:45:00,19.230564888888892,xlsx,,,SBR Discharge Measurement Data\SBR-02\2025-04-03\2025-04-03.xlsx,
+SBR-02,SBR,2025-06-19,2025-06-19 13:53:47,0.07,tsv_flowtracker,10.7,3.75,SBR Discharge Measurement Data\SBR-02\2025-06-19\SBR_2_6_19_25A.tsv,SonTek FlowTracker tsv; discharge native ft3/s
+SBR-03,SBR,2024-12-29,2024-12-29 12:05:00,4.2971,xlsx,,,SBR Discharge Measurement Data\SBR-03\2024-12-29\2024-12-29.xlsx,total taken from cell below label
+SBR-04,SBR,2025-04-03,2025-04-03 14:39:07,442.59836460443296,qrev_adcp,,,SBR Discharge Measurement Data\SBR-04\2025-04-03\20250822_135307_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+SBR-05,SBR,2024-09-05,2024-09-05 13:25:00,0.007524999999999999,xlsx,,,SBR Discharge Measurement Data\SBR-05\2024-09-05\2024-09-05.xlsx,
+SBR-05,SBR,2024-12-29,2024-12-29 15:15:00,11.776923076923078,xlsx,,,SBR Discharge Measurement Data\SBR-05\2024-12-29\2024-12-29.xlsx,
+SBR-05,SBR,2025-04-03,2025-04-03 11:30:17,92.09994446026599,qrev_adcp,,,SBR Discharge Measurement Data\SBR-05\2025-04-03\20250822_134927_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+SBR-06,SBR,2024-12-29,2024-12-29 12:35:00,2.529,xlsx,,,SBR Discharge Measurement Data\SBR-06\2024-12-29\2024-12-29.xlsx,
+SBR-06,SBR,2025-04-03,2025-04-03 15:15:08,90.66510955224499,qrev_adcp,,,SBR Discharge Measurement Data\SBR-06\2025-04-03\20250822_135355_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+SBR-07,SBR,2025-04-03,2025-04-03 12:37:55,709.3981994962639,qrev_adcp,,,SBR Discharge Measurement Data\SBR-07\2025-04-03\20250822_135057_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+SBR-07,SBR,2025-06-13,2025-06-13 15:19:54,17.679581590020998,qrev_adcp,,,SBR Discharge Measurement Data\SBR-07\2025-06-13\20250618_152345_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+SBR-08,SBR,2024-09-05,2024-09-05 11:15:00,1.76861,xlsx,,,SBR Discharge Measurement Data\SBR-08\2024-09-05\2024-09-05.xlsx,
+SBR-08,SBR,2024-12-29,2024-12-29 15:45:00,19.30890909090909,xlsx,,,SBR Discharge Measurement Data\SBR-08\2024-12-29\2024-12-29.xlsx,
+SBR-08,SBR,2025-04-03,2025-04-03 12:03:16,129.963270656005,qrev_adcp,,,SBR Discharge Measurement Data\SBR-08\2025-04-03\20250822_135008_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+SBR-09,SBR,2024-12-29,2024-12-29 13:55:00,3.525666666666667,xlsx,,,SBR Discharge Measurement Data\SBR-09\2024-12-29\2024-12-29.xlsx,
+SBR-09,SBR,2025-04-03,2025-04-03 08:49:58,69.125281745247,qrev_adcp,,,SBR Discharge Measurement Data\SBR-09\2025-04-03\20250822_134624_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+SBR-09,SBR,2025-04-29,2025-04-29 15:30:00,0.36372,xlsx,,,SBR Discharge Measurement Data\SBR-09\2025-04-29\2025-04-29.xlsx,
+SBR-09,SBR,2025-05-02,2025-05-02 11:50:00,0.8121056,xlsx,,,SBR Discharge Measurement Data\SBR-09\2025-05-02\2025-05-02.xlsx,
+SBR-09,SBR,2025-05-07,2025-05-07 10:15:00,19.72,xlsx,,,SBR Discharge Measurement Data\SBR-09\2025-05-07\2025-05-07.xlsx,
+SBR-09,SBR,2025-06-13,2025-06-13 14:38:45,0.669919227299,qrev_adcp,,,SBR Discharge Measurement Data\SBR-09\2025-06-13\20250618_155218_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+SBR-09,SBR,2025-06-19,2025-06-19 09:01:47,2.66,tsv_flowtracker,7.8,11.22,SBR Discharge Measurement Data\SBR-09\2025-06-19\SBR_09_6_19_25.tsv,SonTek FlowTracker tsv; discharge native ft3/s
+SBR-10,SBR,2024-12-29,2024-12-29 13:25:00,1.0305,xlsx,,,SBR Discharge Measurement Data\SBR-10\2024-12-29\2024-12-29.xlsx,
+SBR-10,SBR,2025-04-03,2025-04-03 09:35:00,21.720799999999997,xlsx,,,SBR Discharge Measurement Data\SBR-10\2025-04-03\2025-04-03.xlsx,
+SBR-10,SBR,2025-04-29,2025-04-29 15:00:00,0.16074000000000002,xlsx,,,SBR Discharge Measurement Data\SBR-10\2025-04-29\2025-04-29.xlsx,
+SBR-10,SBR,2025-05-02,2025-05-02 10:50:00,0.20781000000000002,xlsx,,,SBR Discharge Measurement Data\SBR-10\2025-05-02\2025-05-02.xlsx,
+SBR-10,SBR,2025-05-07,2025-05-07 09:30:00,5.96321,xlsx,,,SBR Discharge Measurement Data\SBR-10\2025-05-07\2025-05-07.xlsx,
+SBR-10,SBR,2025-06-19,2025-06-19 07:46:42,0.64,tsv_flowtracker,4.7,4.77,SBR Discharge Measurement Data\SBR-10\2025-06-19\SBR_10_6_19_25.tsv,SonTek FlowTracker tsv; discharge native ft3/s
+SBR-11,SBR,2025-04-03,2025-04-03 13:11:08,1335.8125825942,qrev_adcp,,,SBR Discharge Measurement Data\SBR-11\2025-04-03\20250822_135143_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+SBR-12,SBR,2024-12-29,2024-12-29 11:40:00,1.4491,xlsx,,,SBR Discharge Measurement Data\SBR-12\2024-12-29.xlsx,
+SBR-13,SBR,2024-12-29,2024-12-29 13:05:00,0.14629999999999999,xlsx,,,SBR Discharge Measurement Data\SBR-13\2024-12-29\2024-12-29.xlsx,
+SBR-13,SBR,2025-04-03,2025-04-03 09:10:00,5.749600000000001,xlsx,,,SBR Discharge Measurement Data\SBR-13\2025-04-03\2025-04-03.xlsx,
+SBR-13,SBR,2025-04-29,2025-04-29 14:40:00,0.020999999999999998,xlsx,,,SBR Discharge Measurement Data\SBR-13\2025-04-29\2025-04-29.xlsx,
+SBR-13,SBR,2025-05-02,2025-05-02 11:25:00,-0.04928399999999999,xlsx,,,SBR Discharge Measurement Data\SBR-13\2025-05-02\2025-05-02.xlsx,
+SBR-13,SBR,2025-05-07,2025-05-07 09:50:00,1.6410239999999996,xlsx,,,SBR Discharge Measurement Data\SBR-13\2025-05-07\2025-05-07.xlsx,
+SBR-13,SBR,2025-06-19,2025-06-19 00:00:00,,xlsx,,,SBR Discharge Measurement Data\SBR-13\2025-06-19\2025-06-19.xlsx,no Total Flow (ft3/sec)= label found
+SBR-14,SBR,2024-12-29,2024-12-29 14:35:00,2.4140000000000006,xlsx,,,SBR Discharge Measurement Data\SBR-14\2024-12-29\2024-12-29.xlsx,
+SBR-14,SBR,2025-04-03,2025-04-03 10:30:00,19.654160000000005,xlsx,,,SBR Discharge Measurement Data\SBR-14\2025-04-03\2025-04-03.xlsx,
+SBR-14,SBR,2025-04-29,2025-04-29 16:20:00,0.08432,xlsx,,,SBR Discharge Measurement Data\SBR-14\2025-04-29\2025-04-29.xlsx,
+SBR-14,SBR,2025-05-02,2025-05-02 15:00:00,0.14644,xlsx,,,SBR Discharge Measurement Data\SBR-14\2025-05-02\2025-05-02.xlsx,
+SBR-14,SBR,2025-05-07,2025-05-07 12:35:00,6.92965,xlsx,,,SBR Discharge Measurement Data\SBR-14\2025-05-07\2025-05-07.xlsx,
+SBR-14,SBR,2025-06-19,2025-06-19 10:11:05,1.34,tsv_flowtracker,6.2,3.29,SBR Discharge Measurement Data\SBR-14\2025-06-19\SBR_14_6_19_25.tsv,SonTek FlowTracker tsv; discharge native ft3/s
+SR-01,SR,2025-07-07,2025-07-07 11:25:44,1.0,tsv_flowtracker,11.7,5.65,SR Discharge Measurement Data\SR-01\2025-07-07\SR_01.tsv,SonTek FlowTracker tsv; discharge native ft3/s
+SR-01,SR,2025-07-29,2025-07-29 10:05:21,4.02,tsv_flowtracker,13.2,12.23,SR Discharge Measurement Data\SR-01\2025-07-29\SR01_7_29.tsv,SonTek FlowTracker tsv; discharge native ft3/s
+SR-02,SR,2024-12-30,2024-12-30 17:05:00,20.85775,xlsx,,,SR Discharge Measurement Data\SR-02\2024-12-30\2024-12-30.xlsx,
+SR-02,SR,2025-06-13,2025-06-13 09:02:00,3.0728320000000005,xlsx,,,SR Discharge Measurement Data\SR-02\2025-06-13\2025-06-13.xlsx,
+SR-02,SR,2025-07-29,2025-07-29 11:34:02,6.45,tsv_flowtracker,14.65,7.52,SR Discharge Measurement Data\SR-02\2025-07-29\SR02_07292025.tsv,SonTek FlowTracker tsv; discharge native ft3/s
+SR-03,SR,2024-12-30,2024-12-30 16:45:00,6.648149999999999,xlsx,,,SR Discharge Measurement Data\SR-03\2024-12-30\2024-12-30.xlsx,
+SR-04,SR,2024-12-30,2024-12-30 16:20:00,31.488,xlsx,,,SR Discharge Measurement Data\SR-04\2024-12-30\2024-12-30.xlsx,
+SR-04,SR,2025-07-29,2025-07-29 13:41:13,5.85,tsv_flowtracker,5.3,4.0,SR Discharge Measurement Data\SR-04\2025-07-29\SR04_7_29.tsv,SonTek FlowTracker tsv; discharge native ft3/s
+SR-05,SR,2024-12-30,2024-12-30 16:00:00,6.980499999999999,xlsx,,,SR Discharge Measurement Data\SR-05\2024-12-30\2024-12-30.xlsx,
+SR-06,SR,2024-12-30,2024-12-30 14:55:00,14.280000000000001,xlsx,,,SR Discharge Measurement Data\SR-06\2024-12-30\2024-12-30.xlsx,
+SR-07,SR,2024-12-30,2024-12-30 15:30:00,32.49009090909091,xlsx,,,SR Discharge Measurement Data\SR-07\2024-12-30\2024-12-30.xlsx,
+SR-07,SR,2025-02-28,2025-02-28 00:00:00,11.673049999999998,xlsx,,,SR Discharge Measurement Data\SR-07\2025-02-28\2025-02-28.xlsx,
+SR-07,SR,2025-07-29,2025-07-29 15:08:36,15.04,tsv_flowtracker,17.2,24.05,SR Discharge Measurement Data\SR-07\2025-07-29\SR07_7_29.tsv,SonTek FlowTracker tsv; discharge native ft3/s
+SR-08,SR,2025-07-09,2025-07-09 15:07:57,16.19,tsv_flowtracker,21.3,25.45,SR Discharge Measurement Data\SR-08\2025-07-09\SR08.tsv,SonTek FlowTracker tsv; discharge native ft3/s
+SR-09,SR,2025-07-09,2025-07-09 11:36:34,2.7714950426159994,qrev_adcp,,,SR Discharge Measurement Data\SR-09\2025-07-09\20250710_110702_4400_QRev.xml,QRev ADCP; discharge converted cms->cfs
+SR-10,SR,2025-02-28,2025-02-28 00:00:00,14.631,xlsx,,,SR Discharge Measurement Data\SR-10\2025-02-28\2025-02-28.xlsx,
+SR-10,SR,2025-07-07,2025-07-07 14:08:02,4.14,tsv_flowtracker,16.2,7.9,SR Discharge Measurement Data\SR-10\2025-07-07\SR_10.tsv,SonTek FlowTracker tsv; discharge native ft3/s
+SR-11,SR,2024-12-30,2024-12-30 14:05:00,51.06054545454546,xlsx,,,SR Discharge Measurement Data\SR-11\2024-12-30\2024-12-30.xlsx,
+SR-11,SR,2025-02-28,2025-02-28 00:00:00,17.426399999999997,xlsx,,,SR Discharge Measurement Data\SR-11\2025-02-28\2025-02-28.xlsx,
+SR-11,SR,2025-07-07,2025-07-07 15:29:45,3.03,tsv_flowtracker,18.6,8.86,SR Discharge Measurement Data\SR-11\2025-07-07\SR_11.tsv,SonTek FlowTracker tsv; discharge native ft3/s
