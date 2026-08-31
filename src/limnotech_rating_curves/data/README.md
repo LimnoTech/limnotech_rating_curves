@@ -100,8 +100,15 @@ Site registry, co-location, control-point survey, and the discharge exports.
 | `sensor_elevation(station, index)` | Elevation the distance readings are measured from; subtract a distance to get water-surface elevation |
 | `stage_at_times(station, times)` | Stage at the instants discharge was measured |
 | `rating_curve_sheet(path)`, `flow_sheet_sample(path)` | Measurements out of a flow workbook |
+| `station_coordinates(stations, on_vpn=True)` | Where the stations are: pagaia, falling back to the shipped CSV |
+| `recorded_station_coordinates()` | That CSV alone (`magl_station_coordinates.csv`, beside this file) |
 | `pagaia_session()`, `pagaia_stations(stations)` | The network's pagaia connection |
 | `cross_validate(sample)` | Leave-one-out |
+
+`assemble_magl_sites(..., on_vpn=False)` skips the pagaia client altogether and takes
+station positions from `magl_station_coordinates.csv`, which is the only thing in the
+network assembly that needed the database. Left at `on_vpn=True`, the client is tried
+first and the CSV fills in whatever it does not answer for.
 
 ## `magl_spreadsheets.py` — the historical stage record
 

@@ -17,6 +17,12 @@ log = logging.getLogger(__name__)
 
 _registry_cache: dict = {}
 _survey_cache: dict = {}
+_coordinate_cache: dict = {}
+
+#: Station positions shipped with the package, so the map can be drawn without
+#: reaching the database. Scraped from pagaia; columns ``samplingfeaturename``,
+#: ``latitude``, ``longitude``, one row per sampling feature (``_WL`` and ``_WQ``).
+STATION_COORDINATES_CSV = Path(__file__).parent / "magl_station_coordinates.csv"
 
 
 def _discharge_csv(name: str) -> Path:
@@ -514,6 +520,97 @@ def pagaia_stations(stations, api=None):
         except Exception as exc:  # noqa: BLE001
             log.warning("pagaia station %s not found: %s", station, exc)
     return network
+
+
+def recorded_station_coordinates(path=None) -> dict:
+    """Station positions from the CSV shipped with the package.
+
+    Read once and memoized. This is the copy that does not need the database, and it
+    is what :func:`station_coordinates` falls back to.
+
+    Parameters
+    ----------
+    path : path-like, optional
+        A different CSV, with the same three columns. Defaults to
+        :data:`STATION_COORDINATES_CSV`.
+
+    Returns
+    -------
+    dict
+        ``{station name: (latitude, longitude)}``, skipping rows with no position.
+    """
+    source = Path(STATION_COORDINATES_CSV if path is None else path)
+    key = str(source)
+    if key not in _coordinate_cache:
+        if not source.exists():
+            log.warning("no station coordinate file at %s", source)
+            _coordinate_cache[key] = {}
+            return _coordinate_cache[key]
+        table = pd.read_csv(source)
+        positions = {}
+        for _, row in table.iterrows():
+            name = str(row["samplingfeaturename"]).strip()
+            latitude, longitude = row["latitude"], row["longitude"]
+            if name and pd.notna(latitude) and pd.notna(longitude):
+                positions[name] = (float(latitude), float(longitude))
+        _coordinate_cache[key] = positions
+    return _coordinate_cache[key]
+
+
+def station_coordinates(stations=None, *, on_vpn: bool = True, api=None) -> dict:
+    """Where the MAGL stations are, for the map.
+
+    pagaia is the database of record for station metadata, but it is reachable only
+    on the VPN and with the optional client installed, and a position does not change
+    between runs. So the same positions are kept in
+    :data:`STATION_COORDINATES_CSV`, and this reads them whenever the database is not
+    used or does not answer.
+
+    Parameters
+    ----------
+    stations : sequence of str, optional
+        Station names with ``_WL``. ``None`` returns every station the CSV lists,
+        and skips pagaia, which has no station list to be asked for.
+    on_vpn : bool, default True
+        Whether to ask pagaia at all. ``False`` goes straight to the CSV, which
+        avoids the wait for a connection that is not there.
+    api : optional
+        An existing pagaia session, passed through to :func:`pagaia_stations`.
+
+    Returns
+    -------
+    dict
+        ``{station name: (latitude, longitude)}``, omitting stations neither source
+        places.
+
+    Examples
+    --------
+    >>> station_coordinates(["SBR-09_WL"], on_vpn=False)      # doctest: +SKIP
+    {'SBR-09_WL': (41.9..., -84.2...)}
+    """
+    recorded = recorded_station_coordinates()
+    if stations is None:
+        return dict(recorded)
+
+    wanted = list(dict.fromkeys(str(station) for station in stations))
+    live = {}
+    if on_vpn:
+        try:
+            from . import pagaia
+            live = pagaia.station_coordinates(pagaia_stations(wanted, api=api))
+        except Exception as exc:  # noqa: BLE001 - pagaia down, off VPN, or not installed
+            log.warning("pagaia station coordinates unavailable (%s: %s); reading %s",
+                        type(exc).__name__, exc, STATION_COORDINATES_CSV.name)
+
+    positions = {}
+    for station in wanted:
+        position = live.get(station) or recorded.get(station)
+        if position is not None:
+            positions[station] = position
+        else:
+            log.info("no coordinates for %s in pagaia or %s", station,
+                     STATION_COORDINATES_CSV.name)
+    return positions
 
 
 def pagaia_distance_ft(station: str, start=None, end=None,
@@ -1196,6 +1293,7 @@ def assemble_magl_sites(sites: Sequence[str] | None = None,
                         sources: Sequence[str] | None = None,
                         min_points: int = 3,
                         years: int = 5,
+                        on_vpn: bool = True,
                         refresh: bool = False) -> list[SiteRating]:
     """Build a :class:`SiteRating` for each selected MAGL-network site, unfitted.
 
@@ -1215,6 +1313,12 @@ def assemble_magl_sites(sites: Sequence[str] | None = None,
         How far back to take a USGS gage's measurements. A channel changes, so an old
         gaging describes a rating that no longer applies. A gage with nothing this
         recent is left out.
+    on_vpn : bool, default True
+        Whether station coordinates are read from pagaia. ``False`` takes them from
+        :data:`STATION_COORDINATES_CSV` without opening a session, which is the
+        setting to use off the VPN or without the optional client. Either way the CSV
+        supplies any station the database does not place; see
+        :func:`station_coordinates`.
     refresh : bool, default False
         Refetch instead of using the cache.
 
@@ -1223,7 +1327,6 @@ def assemble_magl_sites(sites: Sequence[str] | None = None,
     list of SiteRating
         With samples and coordinates filled in and ``fits`` still empty.
     """
-    from . import pagaia
 
     wanted = lambda source: (not sources) or (source in sources)
 
@@ -1251,15 +1354,8 @@ def assemble_magl_sites(sites: Sequence[str] | None = None,
 
     station_names = ([f"{sensor}_WL" for sensor in selected_sensors]
                      + [f"{station}_WL" for station, _ in selected_pairs])
-    station_coordinates = {}
-    if station_names:
-        try:
-            station_coordinates = pagaia.station_coordinates(
-                pagaia_stations(sorted(set(station_names))))
-        except Exception as exc:  # noqa: BLE001 - pagaia down, off VPN, or not installed
-            log.warning("MAGL station coordinates unavailable (%s: %s); those sites "
-                        "will fall back to their gage's position or be skipped",
-                        type(exc).__name__, exc)
+    station_positions = station_coordinates(sorted(set(station_names)),
+                                            on_vpn=on_vpn) if station_names else {}
 
     assembled = []
 
@@ -1290,7 +1386,7 @@ def assemble_magl_sites(sites: Sequence[str] | None = None,
             label=f"{station} MAGL stage vs USGS {gage} discharge", sample=sample,
             station=f"{station}_WL", gage=gage,
             group=station_cluster(station),
-            coords=(station_coordinates.get(f"{station}_WL")
+            coords=(station_positions.get(f"{station}_WL")
                     or gage_coordinates.get(gage))))
 
     for sensor in selected_sensors:
@@ -1303,7 +1399,7 @@ def assemble_magl_sites(sites: Sequence[str] | None = None,
             sample_id=f"magl:{sensor}", source="magl",
             label=f"{sensor} (MAGL discharge)", sample=sample,
             station=f"{sensor}_WL", group=station_cluster(sensor),
-            coords=station_coordinates.get(f"{sensor}_WL")))
+            coords=station_positions.get(f"{sensor}_WL")))
 
     return assembled
 

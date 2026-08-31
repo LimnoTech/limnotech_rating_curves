@@ -5,50 +5,34 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "limnotech-rating-curves"
 version = "1.1.0"
-description = "Bayesian stage-discharge rating curves: fit, compare, cross-validate and map."
+description = "Probabilistic stage-discharge rating curves"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary" }
-authors = [{ name = "LimnoTech" }]
-keywords = ["hydrology", "rating curve", "stage-discharge", "bayesian", "pymc"]
+authors = [
+    { name = "Dennis Farmer", email = "dennisfj@umich.edu" },
+    { name = "Jenna Kutscher" },
+]
 
-# Everything needed to fit, score, compare and map a rating, required. The one optional
-# piece is the pagaia extra below, which is the LimnoTech database client.
-#
-# The one dependency that cannot be expressed here is the C++ compiler PyTensor
-# compiles against - pip cannot install a compiler, which is why environment.yml
-# exists and is the recommended route. nutpie, the default sampler, needs no compiler
-# of its own: it compiles the log-density through numba.
 dependencies = [
     "numpy>=1.26",
     "pandas>=2.0",
     "scipy>=1.11",
-    # PyMC and its backend; both fitting backends (ratingcurve and the bundled bdrc
-    # port) run on it. The pins are deliberate - the ELPD path uses arviz.loo / waic
-    # with a supplied relative efficiency, and both have breaking majors queued.
     "pymc>=5.16,<6",
     "arviz>=0.18,<1",
-    # 1.0.3 is the floor: 1.0.2 calls pm.MutableData, which the pymc pinned above
-    # no longer has, so every power-law and spline fit fails on it.
     "ratingcurve>=1.0.3",
-    # every NUTS implementation settings.NUTS_SAMPLERS can be pointed at
     "nutpie>=0.13",
     "numba",
     "numpyro",
     "blackjax",
-    # plotting and the interactive map
     "matplotlib>=3.8",
     "plotly>=5.20",
-    # data sources and file formats
     "dataretrieval>=1.0",
     "openpyxl>=3.1",
     "netcdf4",
     "pyarrow",
     "requests>=2.31",
-    # reads a .env into os.environ before the package is imported, so every
-    # setting in settings.py can be configured from a file. See .env.example.
     "python-dotenv>=1.0",
-    # notebooks and tests
     "jupyter",
     "ipykernel",
     "nbformat",
@@ -56,11 +40,6 @@ dependencies = [
     "pytest-cov",
 ]
 
-# The LimnoTech ODM2 client, needed only to read stage from that database - which
-# takes VPN access and a LimnoTech account. Everything else, including every USGS
-# source and your own measurements, works without it. The station loaders raise an
-# ImportError naming this extra if it is missing; see
-# limnotech_rating_curves.data.pagaia.require.
 [project.optional-dependencies]
 pagaia = ["fb-pagaia @ git+https://github.com/LimnoTech/fb-pagaia.git"]
 
@@ -69,6 +48,9 @@ Homepage = "https://github.com/LimnoTech/limnotech-rating-curves"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"limnotech_rating_curves.data" = ["*.csv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

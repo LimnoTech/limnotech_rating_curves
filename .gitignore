@@ -24,3 +24,6 @@ examples/maps_output/
 !docs/**/*.md
 *.html
 experiments/
+
+
+.DS_Store
